@@ -1,0 +1,247 @@
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import Database from "better-sqlite3";
+import { eq, desc, and, count } from "drizzle-orm";
+import path from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { nanoid } from "nanoid";
+import {
+  users,
+  deals,
+  dealPhotos,
+  dealShares,
+  activities,
+  type User,
+  type Deal,
+} from "../shared/schema";
+import { getDataDir } from "./dataDir";
+
+// ── DB bootstrap ───────────────────────────────────────────────────────────
+const DATA_DIR = getDataDir();
+if (DATA_DIR && !existsSync(DATA_DIR)) {
+  mkdirSync(DATA_DIR, { recursive: true });
+}
+const DB_PATH = path.join(DATA_DIR, "underwriter.db");
+const sqlite = new Database(DB_PATH);
+sqlite.pragma("journal_mode = WAL");
+sqlite.pragma("foreign_keys = ON");
+
+// Hand-rolled CREATE TABLEs so a fresh container boots without `drizzle-kit
+// push`. Idempotent: `IF NOT EXISTS`. Keep in sync with shared/schema.ts.
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS deals (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    address TEXT,
+    property_type TEXT,
+    status TEXT NOT NULL DEFAULT 'analyzing',
+    inputs TEXT NOT NULL,
+    purchase_price INTEGER,
+    units INTEGER,
+    cap_rate_pct REAL,
+    cash_flow_mo INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS deals_user_idx ON deals(user_id);
+
+  CREATE TABLE IF NOT EXISTS deal_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    caption TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS deal_shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    expires_at TEXT,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS activities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    deal_id TEXT,
+    type TEXT NOT NULL,
+    meta TEXT,
+    created_at TEXT NOT NULL
+  );
+`);
+
+export const db = drizzle(sqlite);
+
+// ── Users ──────────────────────────────────────────────────────────────────
+export function getUserById(id: number): User | undefined {
+  return db.select().from(users).where(eq(users.id, id)).get();
+}
+
+export function getUserByEmail(email: string): User | undefined {
+  return db.select().from(users).where(eq(users.email, email.toLowerCase())).get();
+}
+
+export function createUser(data: {
+  email: string;
+  passwordHash: string;
+  name: string;
+  role?: "user" | "admin";
+  status?: "pending" | "active" | "blocked";
+}): User {
+  const now = new Date().toISOString();
+  const result = db.insert(users).values({
+    email: data.email.toLowerCase(),
+    passwordHash: data.passwordHash,
+    name: data.name,
+    role: data.role ?? "user",
+    status: data.status ?? "pending",
+    createdAt: now,
+  }).run();
+  return getUserById(Number(result.lastInsertRowid))!;
+}
+
+export function setUserStatus(id: number, status: "pending" | "active" | "blocked"): void {
+  db.update(users).set({ status }).where(eq(users.id, id)).run();
+}
+
+export function setUserRole(id: number, role: "user" | "admin"): void {
+  db.update(users).set({ role }).where(eq(users.id, id)).run();
+}
+
+export function setUserPassword(id: number, passwordHash: string): void {
+  db.update(users).set({ passwordHash }).where(eq(users.id, id)).run();
+}
+
+export function deleteUser(id: number): void {
+  db.delete(users).where(eq(users.id, id)).run();
+}
+
+export function listUsers(): User[] {
+  return db.select().from(users).orderBy(desc(users.createdAt)).all();
+}
+
+export function countActiveAdmins(): number {
+  const row = db.select({ n: count() }).from(users)
+    .where(and(eq(users.role, "admin"), eq(users.status, "active"))).get();
+  return Number(row?.n ?? 0);
+}
+
+// ── Deals ──────────────────────────────────────────────────────────────────
+export function listDealsForUser(userId: number, isAdmin: boolean): Deal[] {
+  if (isAdmin) {
+    return db.select().from(deals).orderBy(desc(deals.updatedAt)).all();
+  }
+  return db.select().from(deals).where(eq(deals.userId, userId)).orderBy(desc(deals.updatedAt)).all();
+}
+
+export function getDealById(id: string): Deal | undefined {
+  return db.select().from(deals).where(eq(deals.id, id)).get();
+}
+
+export interface CreateDealInput {
+  userId: number;
+  name: string;
+  address?: string | null;
+  propertyType?: string | null;
+  status?: string;
+  inputs: string; // JSON DealInputs
+  // denormalized snapshot
+  purchasePrice?: number | null;
+  units?: number | null;
+  capRatePct?: number | null;
+  cashFlowMo?: number | null;
+}
+
+export function createDeal(data: CreateDealInput): Deal {
+  const now = new Date().toISOString();
+  const id = nanoid(12);
+  db.insert(deals).values({
+    id,
+    userId: data.userId,
+    name: data.name,
+    address: data.address ?? null,
+    propertyType: data.propertyType ?? null,
+    status: data.status ?? "analyzing",
+    inputs: data.inputs,
+    purchasePrice: data.purchasePrice ?? null,
+    units: data.units ?? null,
+    capRatePct: data.capRatePct ?? null,
+    cashFlowMo: data.cashFlowMo ?? null,
+    createdAt: now,
+    updatedAt: now,
+  }).run();
+  return getDealById(id)!;
+}
+
+export interface UpdateDealInput {
+  name?: string;
+  address?: string | null;
+  propertyType?: string | null;
+  status?: string;
+  inputs?: string;
+  purchasePrice?: number | null;
+  units?: number | null;
+  capRatePct?: number | null;
+  cashFlowMo?: number | null;
+}
+
+export function updateDeal(id: string, data: UpdateDealInput): Deal | undefined {
+  const now = new Date().toISOString();
+  const existing = getDealById(id);
+  if (!existing) return undefined;
+  db.update(deals).set({ ...data, updatedAt: now }).where(eq(deals.id, id)).run();
+  return getDealById(id);
+}
+
+export function deleteDeal(id: string): void {
+  db.delete(deals).where(eq(deals.id, id)).run();
+  db.delete(dealPhotos).where(eq(dealPhotos.dealId, id)).run();
+  db.delete(dealShares).where(eq(dealShares.dealId, id)).run();
+  db.delete(activities).where(eq(activities.dealId, id)).run();
+}
+
+// ── Activities ────────────────────────────────────────────────────────────
+export function logActivity(
+  type: string,
+  opts: { userId?: number; dealId?: string; meta?: unknown } = {},
+): void {
+  const now = new Date().toISOString();
+  db.insert(activities).values({
+    type,
+    userId: opts.userId ?? null,
+    dealId: opts.dealId ?? null,
+    meta: opts.meta == null ? null : JSON.stringify(opts.meta),
+    createdAt: now,
+  }).run();
+}
+
+// ── Summary (public) ──────────────────────────────────────────────────────
+export function publicSummary(): { deals: number; lastUpdated: string | null } {
+  const c = db.select({ n: count() }).from(deals).get();
+  const latest = db.select({ updatedAt: deals.updatedAt }).from(deals).orderBy(desc(deals.updatedAt)).limit(1).get();
+  return {
+    deals: Number(c?.n ?? 0),
+    lastUpdated: latest?.updatedAt ?? null,
+  };
+}
+
+// Export the raw storage namespace too (used by seedAdmin).
+export const storage = {
+  getUserByEmail,
+  createUser,
+  setUserStatus,
+  setUserRole,
+  setUserPassword,
+};
