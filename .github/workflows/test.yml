@@ -14,7 +14,11 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
+      # CI doesn't render PDFs — skip the ~170MB Chromium download.
+      # Production uses system Chromium via the Dockerfile.
       - run: npm ci
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
       # The golden-master test is the ship-blocker (spec §5.5).
       # If this drifts, the engine has silently started lying.
       - run: npm test

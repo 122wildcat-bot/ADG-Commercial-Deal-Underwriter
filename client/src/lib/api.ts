@@ -43,6 +43,44 @@ export interface ExtractResponse {
   message?: string;
 }
 
+/**
+ * Download a PDF (or other binary) from an authed endpoint. Used for the
+ * Print Summary and Investor Report buttons. Triggers a browser download with
+ * the filename pulled from the Content-Disposition header (or the fallback).
+ */
+export async function downloadPdf(
+  path: string,
+  method: "GET" | "POST" = "GET",
+  fallbackFilename = "report.pdf",
+): Promise<void> {
+  const token = getToken();
+  const res = await fetch(path, {
+    method,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    if (res.status === 401) clearAuth();
+    let msg = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j?.error) msg = j.error;
+    } catch {}
+    throw new ApiError(res.status, msg);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  const m = cd.match(/filename\s*=\s*"?([^";]+)"?/i);
+  const filename = m ? m[1] : fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 /** Multipart upload to the AI document importer. Separate from `request` because
  *  it sends FormData (no JSON Content-Type — the browser sets the boundary). */
 export async function uploadExtract(file: File): Promise<ExtractResponse> {

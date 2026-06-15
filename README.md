@@ -55,6 +55,8 @@ Each Railway service auto-deploys from its connected GitHub branch on push.
 | `POST /api/deals/:id/duplicate` | token | Clone a deal |
 | `POST /api/underwrite` | token | Stateless underwrite (no save) |
 | `POST /api/extract` | token | AI import: PDF / image / CSV → partial `DealInputs` |
+| `GET /api/deals/:id/print.pdf` | token | Deterministic engine-data summary (no API key) |
+| `POST /api/deals/:id/report.pdf` | token | Claude-generated investor report (needs `ANTHROPIC_API_KEY`) |
 
 `outputs` are always computed live from the shared engine — they are never
 stored, so numbers can never go stale.
@@ -100,6 +102,39 @@ The Rent Roll section has two modes (`inputs.rentEntryMode`):
 
 The engine honors the mode; deals saved before this field existed (and the
 golden master) behave exactly as before, since absent ⇒ `"roll"`.
+
+## Investor Report & Print Summary
+
+The deal analysis page has two report buttons:
+
+- **Print Summary** — a deterministic, branded PDF of the engine's outputs
+  (cover, Year-1 waterfall, ratio grid, projection table, sale analysis).
+  No API key, instant, free. Source: `server/printTemplate.ts` + Puppeteer
+  (`server/pdfRender.ts`).
+- **Investor Report** — a Claude-generated, investor-grade narrative report
+  with executive verdict, three-price framework (Ask / Walk-Away Ceiling /
+  Buy Target), income normalization (Seller View vs. Lender-Underwritten),
+  sensitivity / stress testing, comparable evidence, strategy & negotiation
+  plan, and a due-diligence checklist. Mirrors the PVG (Property Valuation
+  Generator) pattern, reframed for buy-side underwriting. Requires
+  `ANTHROPIC_API_KEY`; web search is enabled (`web_search_20260209`, max 5
+  queries) so the model can ground comps and market context. Latency
+  ~45-90s. Source: `server/aiReport.ts` + `server/reportSystemPrompt.ts`.
+
+Both PDFs use the same Puppeteer renderer (`server/pdfRender.ts`), which
+points at the system Chromium installed by the Dockerfile.
+
+### Switching to Dockerfile build (Railway)
+
+Puppeteer needs Chromium and a handful of apt-installed libs. nixpacks
+can't carry those cleanly, so this repo ships a multi-stage `Dockerfile`
+and `railway.json` is set to `builder: "DOCKERFILE"`. Railway auto-detects
+the change on first deploy after merging.
+
+Local development outside Docker: install Chromium and set
+`PUPPETEER_EXECUTABLE_PATH=/path/to/chromium`, or just let Puppeteer
+download its own bundled Chromium (`npm install` without
+`PUPPETEER_SKIP_DOWNLOAD=true`).
 
 ## AI document import
 
