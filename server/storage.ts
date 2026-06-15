@@ -9,6 +9,7 @@ import {
   deals,
   dealPhotos,
   dealShares,
+  dealReports,
   activities,
   type User,
   type Deal,
@@ -71,6 +72,20 @@ sqlite.exec(`
     expires_at TEXT,
     created_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS deal_reports (
+    id TEXT PRIMARY KEY,
+    deal_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'investor',
+    filename TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    model TEXT,
+    duration_ms INTEGER,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS deal_reports_deal_idx ON deal_reports(deal_id);
 
   CREATE TABLE IF NOT EXISTS activities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,7 +224,50 @@ export function deleteDeal(id: string): void {
   db.delete(deals).where(eq(deals.id, id)).run();
   db.delete(dealPhotos).where(eq(dealPhotos.dealId, id)).run();
   db.delete(dealShares).where(eq(dealShares.dealId, id)).run();
+  db.delete(dealReports).where(eq(dealReports.dealId, id)).run();
   db.delete(activities).where(eq(activities.dealId, id)).run();
+}
+
+// ── Reports ──────────────────────────────────────────────────────────────
+export interface CreateReportInput {
+  dealId: string;
+  userId: number;
+  kind?: "investor";
+  filename: string;
+  path: string;          // relative to <dataDir>/reports
+  sizeBytes: number;
+  model?: string | null;
+  durationMs?: number | null;
+}
+
+export function createReport(data: CreateReportInput) {
+  const now = new Date().toISOString();
+  const id = nanoid(12);
+  db.insert(dealReports).values({
+    id,
+    dealId: data.dealId,
+    userId: data.userId,
+    kind: data.kind ?? "investor",
+    filename: data.filename,
+    path: data.path,
+    sizeBytes: data.sizeBytes,
+    model: data.model ?? null,
+    durationMs: data.durationMs ?? null,
+    createdAt: now,
+  }).run();
+  return getReportById(id)!;
+}
+
+export function getReportById(id: string) {
+  return db.select().from(dealReports).where(eq(dealReports.id, id)).get();
+}
+
+export function listReportsForDeal(dealId: string) {
+  return db.select().from(dealReports).where(eq(dealReports.dealId, dealId)).orderBy(desc(dealReports.createdAt)).all();
+}
+
+export function deleteReport(id: string): void {
+  db.delete(dealReports).where(eq(dealReports.id, id)).run();
 }
 
 // ── Activities ────────────────────────────────────────────────────────────

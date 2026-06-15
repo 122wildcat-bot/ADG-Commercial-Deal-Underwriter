@@ -15,6 +15,14 @@ import { buildReportSystemPrompt, type AgentBrand } from "./reportSystemPrompt";
 
 const DEFAULT_MODEL = "claude-opus-4-8";
 const MAX_TOKENS = 32_000;
+// 10 minutes. Streaming with adaptive thinking + web search can spike past
+// 5 min on slow queries; this leaves headroom without inviting truly stuck
+// jobs to sit forever.
+const REQUEST_TIMEOUT_MS = 10 * 60_000;
+// Web search latency is roughly linear in query count. Three is enough for
+// a defensible report (a comp pull, a market-rent check, a tax/jurisdiction
+// query) and shaves ~30-60s off the worst case vs five.
+const MAX_WEB_SEARCH_USES = 3;
 
 export interface GenerateReportArgs {
   deal: Pick<Deal, "name" | "address" | "propertyType">;
@@ -49,7 +57,7 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
     throw new Error("AI report is not configured. Set ANTHROPIC_API_KEY on this deployment.");
   }
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
-  const client = new Anthropic({ apiKey, timeout: 5 * 60_000 });
+  const client = new Anthropic({ apiKey, timeout: REQUEST_TIMEOUT_MS });
 
   const system = buildReportSystemPrompt(args.agent);
 
@@ -58,7 +66,7 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
   // Adaptive thinking lets the model decide how much to reason per request.
   const useSearch = args.enableWebSearch !== false;
   const tools: Anthropic.Messages.ToolUnion[] = useSearch
-    ? [{ type: "web_search_20260209", name: "web_search", max_uses: 5 }]
+    ? [{ type: "web_search_20260209", name: "web_search", max_uses: MAX_WEB_SEARCH_USES }]
     : [];
 
   const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
