@@ -10,11 +10,9 @@ import { renderHtmlToPdf, slugifyForFilename } from "./pdfRender";
 import { buildPrintHtml } from "./printTemplate";
 import { generateAiReport, isReportConfigured } from "./aiReport";
 import { saveReportPdf, readReportPdf, deleteReportPdf } from "./reportStorage";
-import { nanoid } from "nanoid";
 
 import {
   createDeal,
-  createReport,
   createUser,
   deleteDeal,
   deleteReport,
@@ -28,10 +26,14 @@ import {
   listReportsForDeal,
   listUsers,
   logActivity,
+  markReportFailed,
+  markReportReady,
   publicSummary,
   setUserRole,
   setUserStatus,
+  startReportJob,
   updateDeal,
+  updateReportStage,
 } from "./storage";
 import {
   hashPassword,
@@ -344,16 +346,16 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
     }
   });
 
-  // POST /api/deals/:id/report.pdf — AI-generated investor report.
-  // Streams the deal to Claude with the buy-side system prompt + web_search,
-  // renders the returned HTML to PDF via Puppeteer, SAVES the PDF to disk +
-  // DB, then returns it.
+  // POST /api/deals/:id/report — kick off an AI Investor Report generation.
+  // Returns { reportId } IMMEDIATELY; the actual generation runs in the
+  // background and updates the report row's status/stage as it progresses.
+  // This avoids Railway's edge timeout (~60-90s for idle connections), which
+  // was killing long-running reports with a 502.
   //
-  // Save-before-respond is deliberate: long reports can exceed Railway's
-  // edge timeout, causing a 502 during delivery. Persisting first means the
-  // user finds the finished report in the Saved Reports list even if the
-  // download leg of the request fails.
-  app.post("/api/deals/:id/report.pdf", requireAuth, async (req, res) => {
+  // The client polls GET /api/reports/:id every ~1.5s for status + stage and
+  // renders a progress bar. When status flips to "ready", the client
+  // downloads via GET /api/reports/:id/download.
+  app.post("/api/deals/:id/report", requireAuth, async (req, res) => {
     const deal = getDealById(String(req.params.id));
     if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
       res.status(404).json({ error: "Deal not found" });
@@ -371,50 +373,89 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
       res.status(500).json({ error: "Deal inputs are corrupt." });
       return;
     }
-    const t0 = Date.now();
-    try {
-      const outputs = underwrite(inputs);
-      console.log(`[investor-report] deal=${deal.id} generating…`);
-      const result = await generateAiReport({ deal, inputs, outputs });
-      console.log(`[investor-report] deal=${deal.id} claude_ms=${result.durationMs} model=${result.model}`);
-      const pdf = await renderHtmlToPdf(result.html, {
-        left: "ADG · The Adam Druck Group · Investment Underwriting & Valuation",
-        right: deal.name,
-      });
-      const filename = `ADG_Investor_Report_${slugifyForFilename(deal.name)}_${new Date().toISOString().slice(0, 10)}.pdf`;
 
-      // Save to disk + DB BEFORE responding. If the response fails (502),
-      // the saved record + file are intact for the Saved Reports list.
-      const reportId = nanoid(12);
-      const saved = await saveReportPdf({ dealId: deal.id, reportId, pdf });
-      const record = createReport({
-        dealId: deal.id,
-        userId: req.user!.id,
-        kind: "investor",
-        filename,
-        path: saved.relPath,
-        sizeBytes: saved.sizeBytes,
-        model: result.model,
-        durationMs: result.durationMs,
-      });
-      const totalMs = Date.now() - t0;
-      console.log(`[investor-report] deal=${deal.id} saved=${record.id} bytes=${pdf.length} total_ms=${totalMs}`);
-      logActivity("deal.investor_report", {
-        userId: req.user!.id,
-        dealId: deal.id,
-        meta: { reportId: record.id, model: result.model, durationMs: result.durationMs, usage: result.usage },
-      });
+    const filename = `ADG_Investor_Report_${slugifyForFilename(deal.name)}_${new Date().toISOString().slice(0, 10)}.pdf`;
+    const reportId = startReportJob({
+      dealId: deal.id,
+      userId: req.user!.id,
+      kind: "investor",
+      filename,
+    });
+    res.json({ reportId });
 
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-      res.setHeader("X-Report-Id", record.id);
-      res.setHeader("Content-Length", String(pdf.length));
-      res.end(pdf);
-    } catch (e) {
-      const totalMs = Date.now() - t0;
-      console.error(`[investor-report] deal=${deal.id} failed after ${totalMs}ms:`, e);
-      res.status(500).json({ error: (e as Error).message || "Report generation failed" });
+    // Fire-and-forget. Persist status/stage so the client polling can follow
+    // along. Wrapped in a self-invoking async block so any unhandled rejection
+    // surfaces in the log, not as an uncaughtException that kills the process.
+    void (async () => {
+      const t0 = Date.now();
+      console.log(`[investor-report] report=${reportId} deal=${deal.id} starting…`);
+      try {
+        const outputs = underwrite(inputs);
+        const result = await generateAiReport({
+          deal,
+          inputs,
+          outputs,
+          onStage: (stage) => {
+            console.log(`[investor-report] report=${reportId} stage=${stage}`);
+            updateReportStage(reportId, stage);
+          },
+        });
+        console.log(`[investor-report] report=${reportId} claude_ms=${result.durationMs}`);
+        updateReportStage(reportId, "rendering");
+        const pdf = await renderHtmlToPdf(result.html, {
+          left: "ADG · The Adam Druck Group · Investment Underwriting & Valuation",
+          right: deal.name,
+        });
+        updateReportStage(reportId, "saving");
+        const saved = await saveReportPdf({ dealId: deal.id, reportId, pdf });
+        markReportReady(reportId, {
+          path: saved.relPath,
+          sizeBytes: saved.sizeBytes,
+          model: result.model,
+          durationMs: result.durationMs,
+        });
+        const totalMs = Date.now() - t0;
+        console.log(`[investor-report] report=${reportId} ready bytes=${pdf.length} total_ms=${totalMs}`);
+        logActivity("deal.investor_report", {
+          userId: req.user!.id,
+          dealId: deal.id,
+          meta: { reportId, model: result.model, durationMs: result.durationMs, usage: result.usage },
+        });
+      } catch (e) {
+        const totalMs = Date.now() - t0;
+        const message = (e as Error).message || "Report generation failed";
+        console.error(`[investor-report] report=${reportId} failed after ${totalMs}ms:`, e);
+        markReportFailed(reportId, message);
+      }
+    })();
+  });
+
+  // GET /api/reports/:id — poll a report's status + stage (for the progress
+  // bar). Returns the full metadata blob. Lightweight — no body, no file IO.
+  app.get("/api/reports/:id", requireAuth, (req, res) => {
+    const report = getReportById(String(req.params.id));
+    if (!report) { res.status(404).json({ error: "Report not found" }); return; }
+    const deal = getDealById(report.dealId);
+    if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
+      res.status(404).json({ error: "Report not found" });
+      return;
     }
+    res.json({
+      report: {
+        id: report.id,
+        dealId: report.dealId,
+        kind: report.kind,
+        status: report.status,
+        stage: report.stage,
+        filename: report.filename,
+        sizeBytes: report.sizeBytes,
+        model: report.model,
+        durationMs: report.durationMs,
+        errorMessage: report.errorMessage,
+        startedAt: report.startedAt,
+        createdAt: report.createdAt,
+      },
+    });
   });
 
   // GET /api/deals/:id/reports — list saved reports for a deal.
@@ -443,6 +484,15 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
     const deal = getDealById(report.dealId);
     if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
       res.status(404).json({ error: "Report not found" });
+      return;
+    }
+    if (report.status !== "ready") {
+      res.status(409).json({
+        error:
+          report.status === "generating"
+            ? "Report is still generating. Wait for the progress bar to complete."
+            : report.errorMessage || "Report generation failed.",
+      });
       return;
     }
     try {
