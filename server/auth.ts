@@ -28,6 +28,9 @@ export function signToken(user: UserRow): string {
   return jwt.sign({ userId: user.id }, jwtSecret(), { expiresIn: TOKEN_TTL });
 }
 
+/** Exposed so server/routes.ts can verify the Suite's SSO token. */
+export { jwtSecret };
+
 export function safeUser(u: UserRow) {
   // Strip the password hash before returning a user blob to the client.
   const { passwordHash: _ph, ...rest } = u;

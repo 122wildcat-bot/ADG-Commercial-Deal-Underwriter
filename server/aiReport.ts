@@ -120,43 +120,75 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
     ],
   });
 
-  // Bridge Anthropic stream events → stage updates so the client's progress
-  // bar reflects what the model is actually doing in real time. Two subtle
-  // points:
+  // Bridge Anthropic stream events → stage updates AND detailed timing logs.
+  // Two subtle points on the stage logic:
   //
   //  - Claude can emit reasoning preamble TEXT blocks *before* it calls web
   //    search. If we emit "ai_writing" on the first text block, the bar
-  //    jumps to 65% and then back to 35% once the search starts — bad UX
-  //    and misleading. So we only emit "ai_writing" once we've already
-  //    passed "ai_searching" (or web search is disabled entirely).
+  //    jumps to 65% and then back to 35% once the search starts. So we only
+  //    emit "ai_writing" once we've already passed "ai_searching" (or web
+  //    search is disabled entirely).
   //
-  //  - The updateReportStage storage helper is monotonic (only advances,
-  //    never reverses) as a belt-and-suspenders guard against any
-  //    out-of-order callbacks.
+  //  - updateReportStage is monotonic (only advances, never reverses) as a
+  //    belt-and-suspenders guard against any out-of-order callbacks.
+  //
+  // The block-level logs are deliberately verbose — they're the diagnostic
+  // we need to see WHERE long generations spend their time (e.g. 14 min
+  // silent between ai_searching and final output).
   let sawSearch = false;
   let sawText = false;
+  let textBlockChars = 0;
+  let searchCallNum = 0;
+  let textBlockNum = 0;
+  const tStart = Date.now();
+  const elapsed = () => ((Date.now() - tStart) / 1000).toFixed(1) + "s";
+
   stream.on("streamEvent", (event) => {
-    if (event.type !== "content_block_start") return;
-    const cb = (event as { content_block?: { type?: string } }).content_block;
-    if (!cb) return;
-    if (cb.type === "server_tool_use") {
-      if (!sawSearch) {
-        sawSearch = true;
-        args.onStage?.("ai_searching");
+    if (event.type === "content_block_start") {
+      const cb = (event as { content_block?: { type?: string; name?: string } }).content_block;
+      if (!cb) return;
+      if (cb.type === "server_tool_use") {
+        searchCallNum += 1;
+        console.log(`[aiReport] +${elapsed()} web_search call ${searchCallNum} start (name=${cb.name})`);
+        if (!sawSearch) {
+          sawSearch = true;
+          args.onStage?.("ai_searching");
+        }
+      } else if (cb.type === "web_search_tool_result") {
+        console.log(`[aiReport] +${elapsed()} web_search call ${searchCallNum} result received`);
+      } else if (cb.type === "thinking") {
+        console.log(`[aiReport] +${elapsed()} thinking block start`);
+      } else if (cb.type === "text") {
+        textBlockNum += 1;
+        textBlockChars = 0;
+        const pastSearch = sawSearch || !useSearch;
+        console.log(`[aiReport] +${elapsed()} text block ${textBlockNum} start (pastSearch=${pastSearch})`);
+        if (pastSearch && !sawText) {
+          sawText = true;
+          args.onStage?.("ai_writing");
+        }
       }
-    } else if (cb.type === "text") {
-      // Only treat a text block as "writing the report" once we've already
-      // searched (or we never planned to). An early text block is reasoning
-      // preamble, not the final report HTML.
-      const pastSearch = sawSearch || !useSearch;
-      if (pastSearch && !sawText) {
-        sawText = true;
-        args.onStage?.("ai_writing");
+    } else if (event.type === "content_block_delta") {
+      const delta = (event as { delta?: { type?: string; text?: string } }).delta;
+      if (delta?.type === "text_delta" && typeof delta.text === "string") {
+        textBlockChars += delta.text.length;
+      }
+    } else if (event.type === "content_block_stop") {
+      if (textBlockChars > 0) {
+        console.log(`[aiReport] +${elapsed()} text block ${textBlockNum} stop (chars=${textBlockChars})`);
+        textBlockChars = 0;
+      }
+    } else if (event.type === "message_delta") {
+      const usage = (event as { usage?: { output_tokens?: number } }).usage;
+      if (usage?.output_tokens != null) {
+        console.log(`[aiReport] +${elapsed()} message_delta output_tokens=${usage.output_tokens}`);
       }
     }
   });
 
+  console.log(`[aiReport] +${elapsed()} stream opened (model=${model}, web_search=${useSearch ? `≤${MAX_WEB_SEARCH_USES}` : "off"})`);
   const finalMessage = await stream.finalMessage();
+  console.log(`[aiReport] +${elapsed()} finalMessage received, stop_reason=${finalMessage.stop_reason}, searches=${searchCallNum}, text_blocks=${textBlockNum}`);
   const durationMs = Date.now() - t0;
 
   if (finalMessage.stop_reason === "refusal") {
