@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Trash2, Plus } from "lucide-react";
+import { Trash2, Plus, Upload, Loader2 } from "lucide-react";
 import type { DealInputs, ExpenseLine, Loan, OtherIncomeLine, RentUnit } from "@shared/types";
 import { underwrite } from "@shared/engine/underwrite";
-import { api } from "@/lib/api";
+import { api, uploadExtract } from "@/lib/api";
 import { queryClient } from "@/lib/queryClient";
 import { Section } from "@/components/Section";
 import { StickyResultsBar } from "@/components/StickyResultsBar";
-import { defaultDealInputs, PROPERTY_TYPES, UNIT_KINDS, nextId } from "@/lib/defaults";
+import { defaultDealInputs, mergeExtractedInputs, PROPERTY_TYPES, UNIT_KINDS, nextId } from "@/lib/defaults";
 
 interface Props { id?: string }
 
@@ -31,6 +31,11 @@ export function DealEditorPage({ id }: Props) {
   const [address, setAddress] = useState("");
   const [inputs, setInputs] = useState<DealInputs>(() => defaultDealInputs());
   const initializedRef = useRef(false);
+
+  // AI document import
+  const [importing, setImporting] = useState(false);
+  const [importNote, setImportNote] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!isNew && data && !initializedRef.current) {
@@ -80,6 +85,36 @@ export function DealEditorPage({ id }: Props) {
     setInputs((s) => ({ ...s, assumptions: { ...s.assumptions, ...p } }));
   }
 
+  // Upload a PDF / image / CSV → Claude extracts the deal → pre-fill the editor.
+  // Degrades gracefully: an unconfigured key or a failed read just shows a note.
+  async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    setImporting(true);
+    setImportNote(null);
+    try {
+      const res = await uploadExtract(file);
+      if (!res.configured) {
+        setImportNote(res.message || "AI import isn't configured.");
+        return;
+      }
+      if (!res.ok || !res.inputs) {
+        setImportNote(res.warnings?.[0] || "Couldn't read that document — enter the deal manually.");
+        return;
+      }
+      if (res.inputs.name) setName(res.inputs.name);
+      if (res.inputs.address) setAddress(res.inputs.address);
+      setInputs((s) => mergeExtractedInputs(s, res.inputs));
+      const n = res.warnings?.length ? ` (${res.warnings.length} note${res.warnings.length > 1 ? "s" : ""})` : "";
+      setImportNote(`Imported from ${file.name}${n}. Review the fields below, then Save & analyze.`);
+    } catch (err) {
+      setImportNote((err as Error).message || "Import failed.");
+    } finally {
+      setImporting(false);
+    }
+  }
+
   return (
     <>
       <StickyResultsBar outputs={outputs} busy={save.isPending} />
@@ -99,7 +134,24 @@ export function DealEditorPage({ id }: Props) {
               placeholder="Property address"
             />
           </div>
-          <div className="flex gap-2 shrink-0">
+          <div className="flex gap-2 shrink-0 items-center">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.csv,.txt,.md,application/pdf,image/*,text/csv,text/plain"
+              className="hidden"
+              onChange={onPickFile}
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importing}
+              title="Import a PDF, image, or CSV and let AI fill the deal"
+            >
+              {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {importing ? "Reading…" : "Import"}
+            </button>
             <Link href={id ? `/deals/${id}` : "/"} className="btn btn-secondary">Cancel</Link>
             <button
               type="button"
@@ -115,6 +167,12 @@ export function DealEditorPage({ id }: Props) {
         {save.isError && (
           <p className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
             {(save.error as Error).message}
+          </p>
+        )}
+
+        {importNote && (
+          <p className="mb-3 text-sm text-[var(--cb-blue)] bg-blue-50 border border-blue-200 rounded px-3 py-2">
+            {importNote}
           </p>
         )}
 
@@ -137,36 +195,64 @@ export function DealEditorPage({ id }: Props) {
         </Section>
 
         {/* Rent Roll */}
-        <Section title="Rent Roll" subtitle="Per-unit monthly rent.">
-          <div className="space-y-2">
-            {inputs.rentRoll.map((u, idx) => (
-              <RentUnitRow
-                key={u.id}
-                unit={u}
-                onChange={(next) => {
-                  const list = [...inputs.rentRoll]; list[idx] = next; patch({ rentRoll: list });
-                }}
-                onRemove={() => patch({ rentRoll: inputs.rentRoll.filter((x) => x.id !== u.id) })}
-              />
-            ))}
-            <button type="button" className="btn btn-secondary text-sm"
-              onClick={() => patch({
-                rentRoll: [...inputs.rentRoll, {
-                  id: nextId(),
-                  label: `Unit ${inputs.rentRoll.length + 1}`,
-                  kind: "residential",
-                  monthlyRent: 0,
-                }],
-              })}>
-              <Plus className="h-4 w-4" /> Add unit
+        <Section title="Rent Roll" subtitle="Itemize per unit, or drop in a single gross monthly total.">
+          <div className="mb-3 inline-flex rounded-md border border-slate-200 overflow-hidden text-sm">
+            <button
+              type="button"
+              onClick={() => patch({ rentEntryMode: "roll" })}
+              className={`px-3 py-1.5 ${(inputs.rentEntryMode ?? "roll") === "roll" ? "bg-[var(--cb-blue)] text-white" : "bg-white text-[var(--muted-fg)] hover:text-[var(--ink)]"}`}
+            >
+              Itemize by unit
             </button>
-            <div className="flex justify-between border-t border-slate-100 pt-3 mt-3 text-sm">
-              <span className="text-[var(--muted-fg)]">Total monthly gross</span>
-              <span className="font-semibold tabular-nums">
-                ${Math.round(inputs.rentRoll.reduce((a, u) => a + (u.monthlyRent || 0), 0)).toLocaleString()}
-              </span>
-            </div>
+            <button
+              type="button"
+              onClick={() => patch({ rentEntryMode: "simple" })}
+              className={`px-3 py-1.5 border-l border-slate-200 ${inputs.rentEntryMode === "simple" ? "bg-[var(--cb-blue)] text-white" : "bg-white text-[var(--muted-fg)] hover:text-[var(--ink)]"}`}
+            >
+              Single monthly total
+            </button>
           </div>
+
+          {inputs.rentEntryMode === "simple" ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+              <Field label="Total gross monthly rent">
+                <NumberInput value={inputs.simpleMonthlyRent ?? 0} onChange={(v) => patch({ simpleMonthlyRent: v })} min={0} step={50} />
+              </Field>
+              <p className="text-xs text-[var(--muted-fg)] pb-2">
+                Your itemized rent roll is kept — switch back to "Itemize by unit" any time.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {inputs.rentRoll.map((u, idx) => (
+                <RentUnitRow
+                  key={u.id}
+                  unit={u}
+                  onChange={(next) => {
+                    const list = [...inputs.rentRoll]; list[idx] = next; patch({ rentRoll: list });
+                  }}
+                  onRemove={() => patch({ rentRoll: inputs.rentRoll.filter((x) => x.id !== u.id) })}
+                />
+              ))}
+              <button type="button" className="btn btn-secondary text-sm"
+                onClick={() => patch({
+                  rentRoll: [...inputs.rentRoll, {
+                    id: nextId(),
+                    label: `Unit ${inputs.rentRoll.length + 1}`,
+                    kind: "residential",
+                    monthlyRent: 0,
+                  }],
+                })}>
+                <Plus className="h-4 w-4" /> Add unit
+              </button>
+              <div className="flex justify-between border-t border-slate-100 pt-3 mt-3 text-sm">
+                <span className="text-[var(--muted-fg)]">Total monthly gross</span>
+                <span className="font-semibold tabular-nums">
+                  ${Math.round(inputs.rentRoll.reduce((a, u) => a + (u.monthlyRent || 0), 0)).toLocaleString()}
+                </span>
+              </div>
+            </div>
+          )}
         </Section>
 
         {/* Purchase & Financing */}

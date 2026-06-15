@@ -6,7 +6,6 @@ import { rm, readFile } from "fs/promises";
 // the Node loader doesn't fan out into node_modules at runtime). Everything
 // not in this allowlist is externalized.
 const allowlist = [
-  "@anthropic-ai/sdk",
   "bcryptjs",
   "drizzle-orm",
   "drizzle-zod",

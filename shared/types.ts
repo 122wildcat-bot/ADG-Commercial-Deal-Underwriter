@@ -91,6 +91,13 @@ export interface DealInputs {
   /** depreciation period in years; default 39 (commercial), use 27.5 for residential rental */
   depreciationYears: number;
 
+  // Rent can be entered two ways. "roll" (default when absent) itemizes per unit
+  // via rentRoll; "simple" uses a single gross monthly figure (simpleMonthlyRent)
+  // and ignores the roll. The roll is always retained so you can switch back.
+  rentEntryMode?: "roll" | "simple";
+  /** used only when rentEntryMode === "simple": total gross monthly rent for the property */
+  simpleMonthlyRent?: number;
+
   rentRoll: RentUnit[];
   otherIncome: OtherIncomeLine[];
   expenses: ExpenseLine[];

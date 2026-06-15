@@ -163,4 +163,25 @@ describe("engine sanity checks (edge cases)", () => {
     expect(out.depreciationPerYear).toBeLessThan(37_273);
     expect(out.depreciationPerYear).toBeCloseTo(1_025_000 / 39, 0);
   });
+
+  it("simple rent mode uses the single monthly total and ignores the roll", () => {
+    const out = underwrite({ ...FALLSVIEW_INPUTS, rentEntryMode: "simple", simpleMonthlyRent: 5_000 });
+    // 5,000 * 12 = 60,000 gross; the itemized roll (9,770/mo) is ignored.
+    expect(out.year1.grossRent).toBeCloseTo(60_000, 0);
+  });
+
+  it("simple mode still adds other income on top of the single total", () => {
+    const out = underwrite({
+      ...FALLSVIEW_INPUTS,
+      rentEntryMode: "simple",
+      simpleMonthlyRent: 5_000,
+      otherIncome: [{ label: "Laundry", monthly: 250 }],
+    });
+    expect(out.year1.grossRent).toBeCloseTo(63_000, 0); // (5000 + 250) * 12
+  });
+
+  it("rentEntryMode 'roll' (or absent) keeps using the itemized roll", () => {
+    const out = underwrite({ ...FALLSVIEW_INPUTS, rentEntryMode: "roll", simpleMonthlyRent: 99_999 });
+    expect(out.year1.grossRent).toBeCloseTo(117_240, 0); // unchanged — simpleMonthlyRent ignored
+  });
 });

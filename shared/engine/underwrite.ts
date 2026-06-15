@@ -97,8 +97,15 @@ function deriveLoans(inputs: DealInputs): DerivedLoan[] {
 }
 
 function baseGrossRent(inputs: DealInputs): number {
-  const rentRoll = inputs.rentRoll.reduce((acc, u) => acc + (u.monthlyRent || 0), 0) * MONTHS;
   const other = inputs.otherIncome.reduce((acc, o) => acc + (o.monthly || 0), 0) * MONTHS;
+  // "simple" mode: a single gross monthly figure stands in for the whole rent
+  // roll. Other income is still added on top. Anything else (incl. undefined)
+  // sums the itemized roll — so existing deals and the golden master are
+  // unaffected.
+  if (inputs.rentEntryMode === "simple") {
+    return (inputs.simpleMonthlyRent || 0) * MONTHS + other;
+  }
+  const rentRoll = inputs.rentRoll.reduce((acc, u) => acc + (u.monthlyRent || 0), 0) * MONTHS;
   return rentRoll + other;
 }
 
