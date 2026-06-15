@@ -22,15 +22,19 @@ export function DealAnalysisPage({ id }: { id: string }) {
     queryFn: () => api.get<Resp>(`/api/deals/${id}`),
   });
 
+  // Hooks MUST come before any early return — Rules of Hooks. (When useQuery
+  // flipped from loading to loaded, the hook count would go from 0 to 3 and
+  // React would blank the page with "Rendered more hooks than during the
+  // previous render.")
+  const [printing, setPrinting] = useState(false);
+  const [reporting, setReporting] = useState(false);
+  const [reportNote, setReportNote] = useState<string | null>(null);
+
   if (isLoading) return <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6">Loading…</div>;
   if (error || !data) return <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 text-red-700">{(error as Error)?.message || "Not found"}</div>;
 
   const { deal, inputs, outputs } = data;
   const sale = outputs.saleYear;
-
-  const [printing, setPrinting] = useState(false);
-  const [reporting, setReporting] = useState(false);
-  const [reportNote, setReportNote] = useState<string | null>(null);
 
   async function onPrintSummary() {
     setPrinting(true);
