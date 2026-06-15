@@ -288,8 +288,27 @@ export type ReportStage =
   | "saved"
   | "failed";
 
-/** Update a report job's stage (called by the background generator). */
+// Numeric rank for the monotonic stage advance guard below. Without this an
+// out-of-order Anthropic stream event could make the UI progress bar jump
+// backward — confusing for the user even if the underlying work is fine.
+const STAGE_RANK: Record<ReportStage, number> = {
+  queued: 0,
+  ai_thinking: 1,
+  ai_searching: 2,
+  ai_writing: 3,
+  rendering: 4,
+  saving: 5,
+  saved: 6,
+  failed: 99, // terminal — always wins
+};
+
+/** Update a report job's stage. MONOTONIC: only advances forward (failed wins). */
 export function updateReportStage(id: string, stage: ReportStage): void {
+  const current = db.select({ stage: dealReports.stage }).from(dealReports).where(eq(dealReports.id, id)).get();
+  if (!current) return;
+  const currentRank = STAGE_RANK[current.stage as ReportStage] ?? 0;
+  const nextRank = STAGE_RANK[stage] ?? 0;
+  if (nextRank < currentRank) return; // ignore backward transitions
   db.update(dealReports).set({ stage }).where(eq(dealReports.id, id)).run();
 }
 
@@ -329,6 +348,25 @@ export function listReportsForDeal(dealId: string) {
 
 export function deleteReport(id: string): void {
   db.delete(dealReports).where(eq(dealReports.id, id)).run();
+}
+
+/**
+ * On boot, any rows still in status="generating" are by definition orphaned
+ * — the process that was running them no longer exists (Railway redeploy,
+ * OOM crash, etc.). Mark them failed so the UI shows a clear error instead
+ * of an indefinite spinner. Called once at server startup.
+ */
+export function cleanupOrphanedReports(log: (m: string) => void = (m) => console.log(m)): void {
+  const orphans = db.select().from(dealReports).where(eq(dealReports.status, "generating")).all();
+  if (orphans.length === 0) return;
+  for (const r of orphans) {
+    db.update(dealReports).set({
+      status: "failed",
+      stage: "failed",
+      errorMessage: "Generation was interrupted by a server restart. Please try again.",
+    }).where(eq(dealReports.id, r.id)).run();
+  }
+  log(`[report-cleanup] marked ${orphans.length} orphaned generating row(s) as failed.`);
 }
 
 // ── Activities ────────────────────────────────────────────────────────────
