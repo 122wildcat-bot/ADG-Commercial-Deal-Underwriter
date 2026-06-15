@@ -45,16 +45,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates dumb-init \
   && rm -rf /var/lib/apt/lists/*
 
-# Non-root user; /data is where Railway's Volume gets mounted (the
-# getDataDir() resolver writes the SQLite DB there).
-RUN groupadd -r app && useradd -r -g app -G audio,video app \
-  && mkdir -p /data /app && chown -R app:app /data /app
+# Run as root. The Railway Volume was originally created by the nixpacks
+# build (which runs as root), so every file on /data is root-owned. Dropping
+# to a non-root user here would leave the SQLite DB unreadable (WAL mode
+# needs write access to .db-wal / .db-shm even for SELECTs → "attempt to
+# write a readonly database"). Inside an isolated Railway container with a
+# tenant-scoped volume, the security cost of running as root is marginal.
+RUN mkdir -p /data /app
 
-COPY --from=builder --chown=app:app /app/dist ./dist
-COPY --from=builder --chown=app:app /app/node_modules ./node_modules
-COPY --from=builder --chown=app:app /app/package.json ./package.json
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
 
-USER app
 EXPOSE 5000
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "dist/index.cjs"]
