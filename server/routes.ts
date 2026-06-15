@@ -6,6 +6,9 @@ import multer from "multer";
 import { underwrite } from "../shared/engine/underwrite";
 import type { DealInputs } from "../shared/types";
 import { extractDealFromDocument, MAX_UPLOAD_BYTES } from "./aiExtract";
+import { renderHtmlToPdf, slugifyForFilename } from "./pdfRender";
+import { buildPrintHtml } from "./printTemplate";
+import { generateAiReport, isReportConfigured } from "./aiReport";
 
 import {
   createDeal,
@@ -300,6 +303,83 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
       res.json({ outputs: out });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message || "Could not underwrite" });
+    }
+  });
+
+  // ── Reports ──────────────────────────────────────────────────────────
+  // GET /api/deals/:id/print.pdf — deterministic engine-data summary
+  // (no API key required; instant; free per render).
+  app.get("/api/deals/:id/print.pdf", requireAuth, async (req, res) => {
+    const deal = getDealById(String(req.params.id));
+    if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
+      res.status(404).json({ error: "Deal not found" });
+      return;
+    }
+    let inputs: DealInputs;
+    try { inputs = JSON.parse(deal.inputs) as DealInputs; } catch {
+      res.status(500).json({ error: "Deal inputs are corrupt." });
+      return;
+    }
+    try {
+      const outputs = underwrite(inputs);
+      const html = buildPrintHtml({ deal, inputs, outputs, generatedAt: new Date() });
+      const pdf = await renderHtmlToPdf(html, {
+        left: "ADG · The Adam Druck Group · Underwriting Summary",
+        right: deal.name,
+      });
+      const filename = `ADG_Summary_${slugifyForFilename(deal.name)}.pdf`;
+      logActivity("deal.print_summary", { userId: req.user!.id, dealId: deal.id });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("Content-Length", String(pdf.length));
+      res.end(pdf);
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message || "Failed to render PDF" });
+    }
+  });
+
+  // POST /api/deals/:id/report.pdf — AI-generated investor report.
+  // Streams the deal to Claude with the buy-side system prompt + web_search,
+  // renders the returned HTML to PDF via Puppeteer. Degrades gracefully
+  // when no ANTHROPIC_API_KEY is set.
+  app.post("/api/deals/:id/report.pdf", requireAuth, async (req, res) => {
+    const deal = getDealById(String(req.params.id));
+    if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
+      res.status(404).json({ error: "Deal not found" });
+      return;
+    }
+    if (!isReportConfigured()) {
+      res.status(503).json({
+        configured: false,
+        error: "AI Investor Report isn't configured. Set ANTHROPIC_API_KEY on this deployment to enable it. (The Print Summary still works.)",
+      });
+      return;
+    }
+    let inputs: DealInputs;
+    try { inputs = JSON.parse(deal.inputs) as DealInputs; } catch {
+      res.status(500).json({ error: "Deal inputs are corrupt." });
+      return;
+    }
+    try {
+      const outputs = underwrite(inputs);
+      const result = await generateAiReport({ deal, inputs, outputs });
+      const pdf = await renderHtmlToPdf(result.html, {
+        left: "ADG · The Adam Druck Group · Investment Underwriting & Valuation",
+        right: deal.name,
+      });
+      const filename = `ADG_Investor_Report_${slugifyForFilename(deal.name)}.pdf`;
+      logActivity("deal.investor_report", {
+        userId: req.user!.id,
+        dealId: deal.id,
+        meta: { model: result.model, durationMs: result.durationMs, usage: result.usage },
+      });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("Content-Length", String(pdf.length));
+      res.end(pdf);
+    } catch (e) {
+      console.error("[investor-report] failed:", e);
+      res.status(500).json({ error: (e as Error).message || "Report generation failed" });
     }
   });
 

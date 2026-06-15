@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
+import { FileText, Sparkles, Loader2 } from "lucide-react";
 import type { DealInputs, DealOutputs } from "@shared/types";
-import { api } from "@/lib/api";
+import { api, downloadPdf, ApiError } from "@/lib/api";
 import { money, pct } from "@/lib/format";
 import { CashFlowWaterfall } from "@/components/CashFlowWaterfall";
 import { RatioGrid } from "@/components/RatioGrid";
@@ -26,6 +28,35 @@ export function DealAnalysisPage({ id }: { id: string }) {
   const { deal, inputs, outputs } = data;
   const sale = outputs.saleYear;
 
+  const [printing, setPrinting] = useState(false);
+  const [reporting, setReporting] = useState(false);
+  const [reportNote, setReportNote] = useState<string | null>(null);
+
+  async function onPrintSummary() {
+    setPrinting(true);
+    setReportNote(null);
+    try {
+      await downloadPdf(`/api/deals/${id}/print.pdf`, "GET", `ADG_Summary_${deal.name}.pdf`);
+    } catch (err) {
+      setReportNote(err instanceof ApiError ? err.message : (err as Error).message || "Print failed.");
+    } finally {
+      setPrinting(false);
+    }
+  }
+
+  async function onInvestorReport() {
+    setReporting(true);
+    setReportNote("Generating investor report. Claude is researching comps and underwriting the deal — this takes 45-90 seconds.");
+    try {
+      await downloadPdf(`/api/deals/${id}/report.pdf`, "POST", `ADG_Investor_Report_${deal.name}.pdf`);
+      setReportNote("Investor report downloaded.");
+    } catch (err) {
+      setReportNote(err instanceof ApiError ? err.message : (err as Error).message || "Report failed.");
+    } finally {
+      setReporting(false);
+    }
+  }
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5">
       {/* Header */}
@@ -37,11 +68,37 @@ export function DealAnalysisPage({ id }: { id: string }) {
             {(deal.propertyType || "—").replace("_", " ")} · {inputs.units} units
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onPrintSummary}
+            disabled={printing || reporting}
+            className="btn btn-secondary"
+            title="Deterministic engine-data summary (instant, no AI)"
+          >
+            {printing ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+            {printing ? "Rendering…" : "Print Summary"}
+          </button>
+          <button
+            type="button"
+            onClick={onInvestorReport}
+            disabled={printing || reporting}
+            className="btn btn-primary"
+            title="Claude-generated investor-grade report with comps research, normalization, and negotiation plan"
+          >
+            {reporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            {reporting ? "Generating…" : "Investor Report"}
+          </button>
           <Link href={`/deals/${id}/edit`} className="btn btn-secondary">Edit</Link>
           <Link href="/" className="btn btn-ghost">Back to deals</Link>
         </div>
       </div>
+
+      {reportNote && (
+        <p className="mb-4 text-sm text-[var(--cb-blue)] bg-blue-50 border border-blue-200 rounded px-3 py-2">
+          {reportNote}
+        </p>
+      )}
 
       {/* Headline metrics */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
