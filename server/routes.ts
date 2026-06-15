@@ -1,9 +1,11 @@
 import type { Express, Request, Response } from "express";
 import type { Server } from "http";
 import { z } from "zod";
+import multer from "multer";
 
 import { underwrite } from "../shared/engine/underwrite";
 import type { DealInputs } from "../shared/types";
+import { extractDealFromDocument, MAX_UPLOAD_BYTES } from "./aiExtract";
 
 import {
   createDeal,
@@ -37,6 +39,10 @@ import { describeCrmMode } from "./crmClient";
 // these shapes after the parse. `inputs` itself is a freeform JSON blob — we
 // just check it's an object so we don't store garbage. The engine handles
 // missing fields with safe defaults.
+
+// In-memory upload for the AI importer — the file is streamed to Claude and
+// discarded, never written to disk.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES } });
 
 const dealInputsShape = z.record(z.any());
 
@@ -294,6 +300,30 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
       res.json({ outputs: out });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message || "Could not underwrite" });
+    }
+  });
+
+  // AI document import — upload a PDF / image / CSV, get back a partial
+  // DealInputs the editor pre-fills. Degrades gracefully when no API key is set.
+  app.post("/api/extract", requireAuth, upload.single("file"), async (req, res) => {
+    const f = (req as Request & { file?: { buffer: Buffer; mimetype: string; originalname: string } }).file;
+    if (!f) {
+      res.status(400).json({ error: "No file uploaded." });
+      return;
+    }
+    try {
+      const result = await extractDealFromDocument({
+        buffer: f.buffer,
+        mediaType: f.mimetype,
+        filename: f.originalname,
+      });
+      logActivity("deal.extracted", {
+        userId: req.user!.id,
+        meta: { filename: f.originalname, ok: result.ok, configured: result.configured },
+      });
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message || "Extraction failed" });
     }
   });
 

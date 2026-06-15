@@ -33,3 +33,32 @@ export const api = {
   put:  <T>(p: string, b?: unknown) => request<T>("PUT", p, b),
   del:  <T>(p: string) => request<T>("DELETE", p),
 };
+
+export interface ExtractResponse {
+  configured: boolean;
+  ok: boolean;
+  inputs?: any;
+  warnings?: string[];
+  model?: string;
+  message?: string;
+}
+
+/** Multipart upload to the AI document importer. Separate from `request` because
+ *  it sends FormData (no JSON Content-Type — the browser sets the boundary). */
+export async function uploadExtract(file: File): Promise<ExtractResponse> {
+  const token = getToken();
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/extract", {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: fd,
+  });
+  let data: any = {};
+  try { data = await res.json(); } catch {}
+  if (!res.ok) {
+    if (res.status === 401) clearAuth();
+    throw new ApiError(res.status, data?.error || `HTTP ${res.status}`);
+  }
+  return data as ExtractResponse;
+}

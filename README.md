@@ -54,6 +54,7 @@ Each Railway service auto-deploys from its connected GitHub branch on push.
 | `DELETE /api/deals/:id` | token | Delete |
 | `POST /api/deals/:id/duplicate` | token | Clone a deal |
 | `POST /api/underwrite` | token | Stateless underwrite (no save) |
+| `POST /api/extract` | token | AI import: PDF / image / CSV → partial `DealInputs` |
 
 `outputs` are always computed live from the shared engine — they are never
 stored, so numbers can never go stale.
@@ -86,6 +87,34 @@ drift, so the engine cannot silently start lying.
 ```bash
 npm test
 ```
+
+## Rent entry: itemized roll or single total
+
+The Rent Roll section has two modes (`inputs.rentEntryMode`):
+
+- **Itemize by unit** (`"roll"`, the default) — per-unit rows sum to gross rent.
+- **Single monthly total** (`"simple"`) — one `simpleMonthlyRent` figure stands
+  in for the whole roll; handy at the start of a deal before the rent roll is
+  known. The itemized roll is preserved in state, so switching back loses
+  nothing. Other income is added on top in both modes.
+
+The engine honors the mode; deals saved before this field existed (and the
+golden master) behave exactly as before, since absent ⇒ `"roll"`.
+
+## AI document import
+
+Click **Import** in the deal editor to upload a PDF, image, or CSV (an MLS
+sheet, offering memo, rent roll, T-12, …). Claude extracts a partial
+`DealInputs` (via forced tool use) that pre-fills the editor for review — it
+never auto-saves, and it omits fields it can't find rather than guessing.
+
+- Module: `server/aiExtract.ts`. Default model is the most capable Claude,
+  overridable via `ANTHROPIC_MODEL` (e.g. `claude-sonnet-4-6` to cut cost);
+  key via `ANTHROPIC_API_KEY`.
+- **Degrades gracefully** (fleet convention): with no key, Import shows a clear
+  "not configured" note and manual entry is unaffected — core flows never block
+  on the API.
+- Uploads are held in memory, streamed to the API, and discarded (15 MB cap).
 
 ## Tech notes
 
