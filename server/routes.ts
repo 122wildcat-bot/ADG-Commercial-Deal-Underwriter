@@ -9,17 +9,23 @@ import { extractDealFromDocument, MAX_UPLOAD_BYTES } from "./aiExtract";
 import { renderHtmlToPdf, slugifyForFilename } from "./pdfRender";
 import { buildPrintHtml } from "./printTemplate";
 import { generateAiReport, isReportConfigured } from "./aiReport";
+import { saveReportPdf, readReportPdf, deleteReportPdf } from "./reportStorage";
+import { nanoid } from "nanoid";
 
 import {
   createDeal,
+  createReport,
   createUser,
   deleteDeal,
+  deleteReport,
   deleteUser,
   getDealById,
+  getReportById,
   getUserByEmail,
   getUserById,
   countActiveAdmins,
   listDealsForUser,
+  listReportsForDeal,
   listUsers,
   logActivity,
   publicSummary,
@@ -340,8 +346,13 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
 
   // POST /api/deals/:id/report.pdf — AI-generated investor report.
   // Streams the deal to Claude with the buy-side system prompt + web_search,
-  // renders the returned HTML to PDF via Puppeteer. Degrades gracefully
-  // when no ANTHROPIC_API_KEY is set.
+  // renders the returned HTML to PDF via Puppeteer, SAVES the PDF to disk +
+  // DB, then returns it.
+  //
+  // Save-before-respond is deliberate: long reports can exceed Railway's
+  // edge timeout, causing a 502 during delivery. Persisting first means the
+  // user finds the finished report in the Saved Reports list even if the
+  // download leg of the request fails.
   app.post("/api/deals/:id/report.pdf", requireAuth, async (req, res) => {
     const deal = getDealById(String(req.params.id));
     if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
@@ -360,27 +371,103 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
       res.status(500).json({ error: "Deal inputs are corrupt." });
       return;
     }
+    const t0 = Date.now();
     try {
       const outputs = underwrite(inputs);
+      console.log(`[investor-report] deal=${deal.id} generating…`);
       const result = await generateAiReport({ deal, inputs, outputs });
+      console.log(`[investor-report] deal=${deal.id} claude_ms=${result.durationMs} model=${result.model}`);
       const pdf = await renderHtmlToPdf(result.html, {
         left: "ADG · The Adam Druck Group · Investment Underwriting & Valuation",
         right: deal.name,
       });
-      const filename = `ADG_Investor_Report_${slugifyForFilename(deal.name)}.pdf`;
+      const filename = `ADG_Investor_Report_${slugifyForFilename(deal.name)}_${new Date().toISOString().slice(0, 10)}.pdf`;
+
+      // Save to disk + DB BEFORE responding. If the response fails (502),
+      // the saved record + file are intact for the Saved Reports list.
+      const reportId = nanoid(12);
+      const saved = await saveReportPdf({ dealId: deal.id, reportId, pdf });
+      const record = createReport({
+        dealId: deal.id,
+        userId: req.user!.id,
+        kind: "investor",
+        filename,
+        path: saved.relPath,
+        sizeBytes: saved.sizeBytes,
+        model: result.model,
+        durationMs: result.durationMs,
+      });
+      const totalMs = Date.now() - t0;
+      console.log(`[investor-report] deal=${deal.id} saved=${record.id} bytes=${pdf.length} total_ms=${totalMs}`);
       logActivity("deal.investor_report", {
         userId: req.user!.id,
         dealId: deal.id,
-        meta: { model: result.model, durationMs: result.durationMs, usage: result.usage },
+        meta: { reportId: record.id, model: result.model, durationMs: result.durationMs, usage: result.usage },
       });
+
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("X-Report-Id", record.id);
       res.setHeader("Content-Length", String(pdf.length));
       res.end(pdf);
     } catch (e) {
-      console.error("[investor-report] failed:", e);
+      const totalMs = Date.now() - t0;
+      console.error(`[investor-report] deal=${deal.id} failed after ${totalMs}ms:`, e);
       res.status(500).json({ error: (e as Error).message || "Report generation failed" });
     }
+  });
+
+  // GET /api/deals/:id/reports — list saved reports for a deal.
+  app.get("/api/deals/:id/reports", requireAuth, (req, res) => {
+    const deal = getDealById(String(req.params.id));
+    if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
+      res.status(404).json({ error: "Deal not found" });
+      return;
+    }
+    const reports = listReportsForDeal(deal.id).map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      filename: r.filename,
+      sizeBytes: r.sizeBytes,
+      model: r.model,
+      durationMs: r.durationMs,
+      createdAt: r.createdAt,
+    }));
+    res.json({ reports });
+  });
+
+  // GET /api/reports/:id/download — re-download a saved report PDF.
+  app.get("/api/reports/:id/download", requireAuth, (req, res) => {
+    const report = getReportById(String(req.params.id));
+    if (!report) { res.status(404).json({ error: "Report not found" }); return; }
+    const deal = getDealById(report.dealId);
+    if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
+      res.status(404).json({ error: "Report not found" });
+      return;
+    }
+    try {
+      const pdf = readReportPdf(report.path);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${report.filename}"`);
+      res.setHeader("Content-Length", String(pdf.length));
+      res.end(pdf);
+    } catch (e) {
+      res.status(410).json({ error: (e as Error).message || "Report file missing" });
+    }
+  });
+
+  // DELETE /api/reports/:id — remove a saved report (DB + disk).
+  app.delete("/api/reports/:id", requireAuth, (req, res) => {
+    const report = getReportById(String(req.params.id));
+    if (!report) { res.status(404).json({ error: "Report not found" }); return; }
+    const deal = getDealById(report.dealId);
+    if (!deal || (deal.userId !== req.user!.id && req.user!.role !== "admin")) {
+      res.status(404).json({ error: "Report not found" });
+      return;
+    }
+    deleteReportPdf(report.path);
+    deleteReport(report.id);
+    res.json({ ok: true });
   });
 
   // AI document import — upload a PDF / image / CSV, get back a partial

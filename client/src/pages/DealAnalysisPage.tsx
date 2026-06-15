@@ -1,14 +1,25 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { FileText, Sparkles, Loader2 } from "lucide-react";
+import { FileText, Sparkles, Loader2, Download, Trash2 } from "lucide-react";
 import type { DealInputs, DealOutputs } from "@shared/types";
 import { api, downloadPdf, ApiError } from "@/lib/api";
-import { money, pct } from "@/lib/format";
+import { queryClient } from "@/lib/queryClient";
+import { money, pct, shortDate } from "@/lib/format";
 import { CashFlowWaterfall } from "@/components/CashFlowWaterfall";
 import { RatioGrid } from "@/components/RatioGrid";
 import { ProjectionTable } from "@/components/ProjectionTable";
 import { ProjectionCharts } from "@/components/ProjectionCharts";
+
+interface SavedReport {
+  id: string;
+  kind: "investor";
+  filename: string;
+  sizeBytes: number;
+  model: string | null;
+  durationMs: number | null;
+  createdAt: string;
+}
 
 interface Resp {
   deal: { id: string; name: string; address: string | null; propertyType: string | null; status: string; updatedAt: string };
@@ -30,6 +41,15 @@ export function DealAnalysisPage({ id }: { id: string }) {
   const [reporting, setReporting] = useState(false);
   const [reportNote, setReportNote] = useState<string | null>(null);
 
+  const reportsQuery = useQuery({
+    queryKey: ["reports", id],
+    queryFn: () => api.get<{ reports: SavedReport[] }>(`/api/deals/${id}/reports`),
+  });
+  const deleteReport = useMutation({
+    mutationFn: (rid: string) => api.del(`/api/reports/${rid}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reports", id] }),
+  });
+
   if (isLoading) return <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6">Loading…</div>;
   if (error || !data) return <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 text-red-700">{(error as Error)?.message || "Not found"}</div>;
 
@@ -50,14 +70,16 @@ export function DealAnalysisPage({ id }: { id: string }) {
 
   async function onInvestorReport() {
     setReporting(true);
-    setReportNote("Generating investor report. Claude is researching comps and underwriting the deal — this takes 45-90 seconds.");
+    setReportNote("Generating investor report. Claude is researching comps and underwriting the deal — this takes 45-90 seconds. The report is saved to your Saved Reports list even if the download leg times out.");
     try {
       await downloadPdf(`/api/deals/${id}/report.pdf`, "POST", `ADG_Investor_Report_${deal.name}.pdf`);
-      setReportNote("Investor report downloaded.");
+      setReportNote("Investor report downloaded and saved.");
     } catch (err) {
-      setReportNote(err instanceof ApiError ? err.message : (err as Error).message || "Report failed.");
+      const msg = err instanceof ApiError ? err.message : (err as Error).message || "Report failed.";
+      setReportNote(`${msg} If the report finished generating, check Saved Reports below — it may already be there.`);
     } finally {
       setReporting(false);
+      queryClient.invalidateQueries({ queryKey: ["reports", id] });
     }
   }
 
@@ -146,6 +168,61 @@ export function DealAnalysisPage({ id }: { id: string }) {
           <div className="kpi"><div className="kpi-label">Total profit</div><div className={`kpi-value ${sale.totalProfit >= 0 ? "positive" : "negative"}`}>{money(sale.totalProfit)}</div></div>
           <div className="kpi"><div className="kpi-label">Equity multiple</div><div className="kpi-value">{sale.equityMultiple.toFixed(2)}×</div></div>
         </div>
+      </div>
+
+      {/* Saved Reports */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 mt-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-display text-lg font-semibold">Saved investor reports</h2>
+          <span className="text-xs text-[var(--muted-fg)]">
+            {reportsQuery.data ? `${reportsQuery.data.reports.length} on file` : ""}
+          </span>
+        </div>
+        {reportsQuery.isLoading && <p className="text-sm text-[var(--muted-fg)]">Loading…</p>}
+        {reportsQuery.data && reportsQuery.data.reports.length === 0 && (
+          <p className="text-sm text-[var(--muted-fg)]">
+            No saved reports yet. Click <strong>Investor Report</strong> above to generate one — it'll appear here when done.
+          </p>
+        )}
+        {reportsQuery.data && reportsQuery.data.reports.length > 0 && (
+          <ul className="divide-y divide-slate-100">
+            {reportsQuery.data.reports.map((r) => (
+              <li key={r.id} className="py-2.5 flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium truncate">{r.filename}</div>
+                  <div className="text-xs text-[var(--muted-fg)] tabular-nums">
+                    {shortDate(r.createdAt)}
+                    {r.model && ` · ${r.model}`}
+                    {r.sizeBytes && ` · ${(r.sizeBytes / 1024).toFixed(0)} KB`}
+                    {r.durationMs && ` · ${(r.durationMs / 1000).toFixed(0)}s`}
+                  </div>
+                </div>
+                <div className="flex gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => downloadPdf(`/api/reports/${r.id}/download`, "GET", r.filename).catch(() => {})}
+                    className="btn btn-secondary text-xs"
+                    title="Download"
+                  >
+                    <Download className="h-3.5 w-3.5" /> Download
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (confirm(`Delete "${r.filename}"? This cannot be undone.`)) {
+                        deleteReport.mutate(r.id);
+                      }
+                    }}
+                    className="btn btn-ghost text-xs text-red-600"
+                    title="Delete"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

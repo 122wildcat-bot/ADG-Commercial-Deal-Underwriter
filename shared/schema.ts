@@ -76,6 +76,24 @@ export const dealShares = sqliteTable("deal_shares", {
   createdAt: text("created_at").notNull(),
 });
 
+// ── Deal reports ────────────────────────────────────────────────────────────
+// AI Investor Reports are expensive and slow to generate (~45-90s, ~$0.10-
+// 0.30 in API tokens) — we save every successful render so the user can re-
+// download or share it later, and so a 502 during HTTP delivery doesn't lose
+// the work. PDFs live on the /data volume under reports/<dealId>/<id>.pdf.
+export const dealReports = sqliteTable("deal_reports", {
+  id:           text("id").primaryKey(),           // nanoid
+  dealId:       text("deal_id").notNull(),
+  userId:       integer("user_id").notNull(),
+  kind:         text("kind").notNull().default("investor"), // "investor" | future kinds
+  filename:     text("filename").notNull(),        // disposition-ready filename
+  path:         text("path").notNull(),            // relative to <dataDir>/reports
+  sizeBytes:    integer("size_bytes").notNull(),
+  model:        text("model"),                     // e.g. "claude-opus-4-8"
+  durationMs:   integer("duration_ms"),
+  createdAt:    text("created_at").notNull(),
+});
+
 // ── Activities (audit log) ─────────────────────────────────────────────────
 export const activities = sqliteTable("activities", {
   id:        integer("id").primaryKey({ autoIncrement: true }),
