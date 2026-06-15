@@ -14,15 +14,17 @@ import type { DealInputs, DealOutputs } from "../shared/types";
 import { buildReportSystemPrompt, type AgentBrand } from "./reportSystemPrompt";
 
 const DEFAULT_MODEL = "claude-opus-4-8";
-const MAX_TOKENS = 32_000;
-// 10 minutes. Streaming with adaptive thinking + web search can spike past
-// 5 min on slow queries; this leaves headroom without inviting truly stuck
-// jobs to sit forever.
+// 64K (well below Opus 4.8's 128K ceiling). At 32K with adaptive thinking
+// + the newer web_search_20260209's dynamic filtering, the model burned
+// the entire budget on reasoning + tool calls and ran out of room for
+// the actual HTML — saw 33,075 output_tokens for only ~2,500 chars of
+// text in one production run.
+const MAX_TOKENS = 64_000;
+// Bumped down again — the older web_search_20250305 (used below) doesn't
+// recurse into code_execution like 20260209 does, so each search is much
+// cheaper. Two real searches is plenty for a comp + market-rent check.
+const MAX_WEB_SEARCH_USES = 2;
 const REQUEST_TIMEOUT_MS = 10 * 60_000;
-// Web search latency is roughly linear in query count. Three is enough for
-// a defensible report (a comp pull, a market-rent check, a tax/jurisdiction
-// query) and shaves ~30-60s off the worst case vs five.
-const MAX_WEB_SEARCH_USES = 3;
 
 export interface GenerateReportArgs {
   deal: Pick<Deal, "name" | "address" | "propertyType">;
@@ -63,12 +65,24 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
 
   const system = buildReportSystemPrompt(args.agent);
 
-  // Streaming so we can comfortably set max_tokens at 32k without bumping into
-  // SDK HTTP timeouts (a full 8-9 page HTML report is ~25-40k characters).
-  // Adaptive thinking lets the model decide how much to reason per request.
+  // Streaming so we can comfortably set max_tokens at 64k without bumping into
+  // SDK HTTP timeouts (a full 8-9 page HTML report is ~25-40k characters of
+  // visible output, but thinking/tool-use tokens push the total much higher).
+  //
+  // ── Why these choices ──
+  // - thinking: "disabled". A production run with adaptive thinking burned
+  //   the entire 32K output budget on thinking blocks + dynamic-filter
+  //   code_execution scripts and never wrote the HTML. With thinking off
+  //   on Opus 4.8 the system prompt does the steering directly.
+  // - web_search_20250305 (NOT _20260209). The newer 20260209 ships with
+  //   dynamic filtering that spawns internal code_execution / bash /
+  //   text_editor calls to filter results — observed nine such calls in
+  //   addition to three actual searches in the failed run, plus ~9 minutes
+  //   of compounded latency. The older 20250305 is just "search → results";
+  //   plenty for our use case.
   const useSearch = args.enableWebSearch !== false;
   const tools: Anthropic.Messages.ToolUnion[] = useSearch
-    ? [{ type: "web_search_20260209", name: "web_search", max_uses: MAX_WEB_SEARCH_USES }]
+    ? [{ type: "web_search_20250305", name: "web_search", max_uses: MAX_WEB_SEARCH_USES }]
     : [];
 
   const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
@@ -97,7 +111,7 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
   const stream = client.messages.stream({
     model,
     max_tokens: MAX_TOKENS,
-    thinking: { type: "adaptive" },
+    thinking: { type: "disabled" },
     system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
     tools,
     messages: [
@@ -112,7 +126,7 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
               `- Engine outputs are AUTHORITATIVE for the as-entered scenario — use them verbatim.\n` +
               `- Apply lender-style normalization where warranted and produce a Seller View vs. Lender-Underwritten table when the gap is material.\n` +
               `- Use the web_search tool sparingly (≤${MAX_WEB_SEARCH_USES} queries) to ground local comps, rents, and tax / assessment context.\n` +
-              `- Return ONLY the HTML document. No markdown fences. Start with <!DOCTYPE html>.\n\n` +
+              `- **Respond ONLY with the HTML document.** No preamble, no explanation, no markdown fences, no meta-commentary about your process. Start the response with <!DOCTYPE html> and end with </html>. Anything else is a failed report.\n\n` +
               `Payload:\n\`\`\`json\n${JSON.stringify(userPayload, null, 2)}\n\`\`\``,
           },
         ],
