@@ -14,12 +14,30 @@ import { ProjectionCharts } from "@/components/ProjectionCharts";
 interface SavedReport {
   id: string;
   kind: "investor";
+  status: "generating" | "ready" | "failed";
+  stage: "queued" | "ai_thinking" | "ai_searching" | "ai_writing" | "rendering" | "saving" | "saved" | "failed";
   filename: string;
   sizeBytes: number;
   model: string | null;
   durationMs: number | null;
+  errorMessage: string | null;
+  startedAt: string | null;
   createdAt: string;
 }
+
+// Each stage maps to (a) a target percent on the progress bar and (b) a
+// human-readable label. Percentages are deliberately spaced so the bar
+// moves visibly between stages without ever jumping backward.
+const STAGE_META: Record<SavedReport["stage"], { pct: number; label: string }> = {
+  queued:        { pct:  5, label: "Queued…" },
+  ai_thinking:   { pct: 15, label: "Claude is analyzing the deal…" },
+  ai_searching:  { pct: 35, label: "Researching comps and market context…" },
+  ai_writing:    { pct: 65, label: "Drafting the investor report…" },
+  rendering:     { pct: 85, label: "Rendering PDF…" },
+  saving:        { pct: 95, label: "Saving to your reports…" },
+  saved:         { pct: 100, label: "Done." },
+  failed:        { pct: 0, label: "Failed." },
+};
 
 interface Resp {
   deal: { id: string; name: string; address: string | null; propertyType: string | null; status: string; updatedAt: string };
@@ -33,17 +51,18 @@ export function DealAnalysisPage({ id }: { id: string }) {
     queryFn: () => api.get<Resp>(`/api/deals/${id}`),
   });
 
-  // Hooks MUST come before any early return — Rules of Hooks. (When useQuery
-  // flipped from loading to loaded, the hook count would go from 0 to 3 and
-  // React would blank the page with "Rendered more hooks than during the
-  // previous render.")
+  // Hooks MUST come before any early return — Rules of Hooks.
   const [printing, setPrinting] = useState(false);
   const [reporting, setReporting] = useState(false);
   const [reportNote, setReportNote] = useState<string | null>(null);
+  const [activeStage, setActiveStage] = useState<SavedReport["stage"] | null>(null);
 
   const reportsQuery = useQuery({
     queryKey: ["reports", id],
     queryFn: () => api.get<{ reports: SavedReport[] }>(`/api/deals/${id}/reports`),
+    // While a job is running we poll the list too so completed/failed reports
+    // appear in real time.
+    refetchInterval: reporting ? 2_000 : false,
   });
   const deleteReport = useMutation({
     mutationFn: (rid: string) => api.del(`/api/reports/${rid}`),
@@ -70,15 +89,42 @@ export function DealAnalysisPage({ id }: { id: string }) {
 
   async function onInvestorReport() {
     setReporting(true);
-    setReportNote("Generating investor report. Claude is researching comps and underwriting the deal — this takes 45-90 seconds. The report is saved to your Saved Reports list even if the download leg times out.");
+    setReportNote(null);
+    setActiveStage("queued");
     try {
-      await downloadPdf(`/api/deals/${id}/report.pdf`, "POST", `ADG_Investor_Report_${deal.name}.pdf`);
-      setReportNote("Investor report downloaded and saved.");
+      // 1. Kick off the background job; we get a reportId back instantly.
+      const { reportId } = await api.post<{ reportId: string }>(`/api/deals/${id}/report`);
+      queryClient.invalidateQueries({ queryKey: ["reports", id] });
+
+      // 2. Poll status until ready / failed. Each poll is a quick GET so the
+      //    Railway edge timeout doesn't apply.
+      const startedAt = Date.now();
+      const TIMEOUT_MS = 8 * 60_000;
+      while (true) {
+        await new Promise((r) => setTimeout(r, 1_500));
+        if (Date.now() - startedAt > TIMEOUT_MS) {
+          setReportNote(
+            "The report has been running for more than 8 minutes — leaving it in the background. It will show up in Saved Reports below once it finishes, or with an error if it doesn't.",
+          );
+          break;
+        }
+        const { report } = await api.get<{ report: SavedReport }>(`/api/reports/${reportId}`);
+        setActiveStage(report.stage);
+        if (report.status === "ready") {
+          await downloadPdf(`/api/reports/${reportId}/download`, "GET", report.filename).catch(() => {});
+          setReportNote("Investor report ready — downloaded and saved.");
+          break;
+        }
+        if (report.status === "failed") {
+          setReportNote(`Report failed: ${report.errorMessage || "Unknown error."}`);
+          break;
+        }
+      }
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : (err as Error).message || "Report failed.";
-      setReportNote(`${msg} If the report finished generating, check Saved Reports below — it may already be there.`);
+      setReportNote(err instanceof ApiError ? err.message : (err as Error).message || "Report failed.");
     } finally {
       setReporting(false);
+      setActiveStage(null);
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
     }
   }
@@ -119,6 +165,31 @@ export function DealAnalysisPage({ id }: { id: string }) {
           <Link href="/" className="btn btn-ghost">Back to deals</Link>
         </div>
       </div>
+
+      {/* Progress bar — visible while the Investor Report is generating. */}
+      {(reporting || activeStage) && activeStage && (
+        <div className="mb-4 bg-white border border-slate-200 rounded-xl px-4 py-3">
+          <div className="flex items-center justify-between text-sm mb-2">
+            <span className="font-medium flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin text-[var(--celestial)]" />
+              {STAGE_META[activeStage].label}
+            </span>
+            <span className="text-xs text-[var(--muted-fg)] tabular-nums">
+              {STAGE_META[activeStage].pct}%
+            </span>
+          </div>
+          <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-[var(--celestial)] transition-all duration-500 ease-out"
+              style={{ width: `${STAGE_META[activeStage].pct}%` }}
+            />
+          </div>
+          <p className="text-xs text-[var(--muted-fg)] mt-2">
+            Generation runs in the background — you can stay on this page, navigate away, or even close the tab.
+            The finished report will appear in <strong>Saved Reports</strong> below.
+          </p>
+        </div>
+      )}
 
       {reportNote && (
         <p className="mb-4 text-sm text-[var(--cb-blue)] bg-blue-50 border border-blue-200 rounded px-3 py-2">
@@ -189,20 +260,34 @@ export function DealAnalysisPage({ id }: { id: string }) {
             {reportsQuery.data.reports.map((r) => (
               <li key={r.id} className="py-2.5 flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium truncate">{r.filename}</div>
+                  <div className="text-sm font-medium truncate flex items-center gap-2">
+                    {r.filename}
+                    {r.status === "generating" && (
+                      <span className="inline-flex items-center gap-1 text-xs bg-blue-50 text-[var(--cb-blue)] border border-blue-200 rounded px-1.5 py-0.5">
+                        <Loader2 className="h-3 w-3 animate-spin" /> {STAGE_META[r.stage].label}
+                      </span>
+                    )}
+                    {r.status === "failed" && (
+                      <span className="text-xs bg-red-50 text-red-700 border border-red-200 rounded px-1.5 py-0.5">
+                        Failed
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs text-[var(--muted-fg)] tabular-nums">
                     {shortDate(r.createdAt)}
                     {r.model && ` · ${r.model}`}
-                    {r.sizeBytes && ` · ${(r.sizeBytes / 1024).toFixed(0)} KB`}
+                    {r.sizeBytes > 0 && ` · ${(r.sizeBytes / 1024).toFixed(0)} KB`}
                     {r.durationMs && ` · ${(r.durationMs / 1000).toFixed(0)}s`}
+                    {r.errorMessage && r.status === "failed" && ` · ${r.errorMessage}`}
                   </div>
                 </div>
                 <div className="flex gap-1.5 shrink-0">
                   <button
                     type="button"
+                    disabled={r.status !== "ready"}
                     onClick={() => downloadPdf(`/api/reports/${r.id}/download`, "GET", r.filename).catch(() => {})}
-                    className="btn btn-secondary text-xs"
-                    title="Download"
+                    className="btn btn-secondary text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                    title={r.status === "ready" ? "Download" : "Not ready yet"}
                   >
                     <Download className="h-3.5 w-3.5" /> Download
                   </button>

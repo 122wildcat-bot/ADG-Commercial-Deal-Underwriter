@@ -31,6 +31,8 @@ export interface GenerateReportArgs {
   agent?: AgentBrand;
   /** When true (default), Claude is given web_search to research comps and market context. */
   enableWebSearch?: boolean;
+  /** Stage transitions during generation — for the polling progress bar. */
+  onStage?: (stage: "ai_thinking" | "ai_searching" | "ai_writing") => void;
 }
 
 export interface GenerateReportResult {
@@ -90,6 +92,7 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
     engine_outputs: args.outputs,
   };
 
+  args.onStage?.("ai_thinking");
   const t0 = Date.now();
   const stream = client.messages.stream({
     model,
@@ -108,13 +111,30 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
               `RULES:\n` +
               `- Engine outputs are AUTHORITATIVE for the as-entered scenario — use them verbatim.\n` +
               `- Apply lender-style normalization where warranted and produce a Seller View vs. Lender-Underwritten table when the gap is material.\n` +
-              `- Use the web_search tool sparingly (≤5 queries) to ground local comps, rents, and tax / assessment context.\n` +
+              `- Use the web_search tool sparingly (≤${MAX_WEB_SEARCH_USES} queries) to ground local comps, rents, and tax / assessment context.\n` +
               `- Return ONLY the HTML document. No markdown fences. Start with <!DOCTYPE html>.\n\n` +
               `Payload:\n\`\`\`json\n${JSON.stringify(userPayload, null, 2)}\n\`\`\``,
           },
         ],
       },
     ],
+  });
+
+  // Bridge Anthropic stream events → stage updates so the client's progress
+  // bar reflects what the model is actually doing in real time.
+  let sawSearch = false;
+  let sawText = false;
+  stream.on("streamEvent", (event) => {
+    if (event.type !== "content_block_start") return;
+    const cb = (event as { content_block?: { type?: string } }).content_block;
+    if (!cb) return;
+    if (cb.type === "server_tool_use" && !sawSearch) {
+      sawSearch = true;
+      args.onStage?.("ai_searching");
+    } else if (cb.type === "text" && !sawText) {
+      sawText = true;
+      args.onStage?.("ai_writing");
+    }
   });
 
   const finalMessage = await stream.finalMessage();

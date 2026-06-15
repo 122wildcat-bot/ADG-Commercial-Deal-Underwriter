@@ -78,11 +78,15 @@ sqlite.exec(`
     deal_id TEXT NOT NULL,
     user_id INTEGER NOT NULL,
     kind TEXT NOT NULL DEFAULT 'investor',
+    status TEXT NOT NULL DEFAULT 'ready',
+    stage TEXT NOT NULL DEFAULT 'saved',
+    error_message TEXT,
     filename TEXT NOT NULL,
-    path TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
     model TEXT,
     duration_ms INTEGER,
+    started_at TEXT,
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS deal_reports_deal_idx ON deal_reports(deal_id);
@@ -96,6 +100,24 @@ sqlite.exec(`
     created_at TEXT NOT NULL
   );
 `);
+
+// Idempotent ALTER TABLE for existing deal_reports rows from before the
+// background-generation columns existed. CREATE TABLE IF NOT EXISTS won't
+// add columns to an existing table — only the first run creates everything.
+function addColumnIfMissing(table: string, column: string, ddl: string): void {
+  const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name);
+  if (!cols.includes(column)) {
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+addColumnIfMissing("deal_reports", "status",        "status TEXT NOT NULL DEFAULT 'ready'");
+addColumnIfMissing("deal_reports", "stage",         "stage TEXT NOT NULL DEFAULT 'saved'");
+addColumnIfMissing("deal_reports", "error_message", "error_message TEXT");
+addColumnIfMissing("deal_reports", "started_at",    "started_at TEXT");
+// `path` and `size_bytes` previously had NOT NULL with no default — old rows
+// already have values, but new in-progress inserts need a default of empty/0.
+// (Drizzle keeps NOT NULL on those columns; the default on insert is what
+// matters.) No ALTER needed because the values are always provided on insert.
 
 export const db = drizzle(sqlite);
 
@@ -229,18 +251,15 @@ export function deleteDeal(id: string): void {
 }
 
 // ── Reports ──────────────────────────────────────────────────────────────
-export interface CreateReportInput {
+export interface StartReportInput {
   dealId: string;
   userId: number;
   kind?: "investor";
-  filename: string;
-  path: string;          // relative to <dataDir>/reports
-  sizeBytes: number;
-  model?: string | null;
-  durationMs?: number | null;
+  filename: string; // filename we'll suggest at download time
 }
 
-export function createReport(data: CreateReportInput) {
+/** Start a report job: insert the row in 'generating'/'queued' state. */
+export function startReportJob(data: StartReportInput): string {
   const now = new Date().toISOString();
   const id = nanoid(12);
   db.insert(dealReports).values({
@@ -248,14 +267,56 @@ export function createReport(data: CreateReportInput) {
     dealId: data.dealId,
     userId: data.userId,
     kind: data.kind ?? "investor",
+    status: "generating",
+    stage: "queued",
     filename: data.filename,
-    path: data.path,
-    sizeBytes: data.sizeBytes,
-    model: data.model ?? null,
-    durationMs: data.durationMs ?? null,
+    path: "",
+    sizeBytes: 0,
+    startedAt: now,
     createdAt: now,
   }).run();
-  return getReportById(id)!;
+  return id;
+}
+
+export type ReportStage =
+  | "queued"
+  | "ai_thinking"
+  | "ai_searching"
+  | "ai_writing"
+  | "rendering"
+  | "saving"
+  | "saved"
+  | "failed";
+
+/** Update a report job's stage (called by the background generator). */
+export function updateReportStage(id: string, stage: ReportStage): void {
+  db.update(dealReports).set({ stage }).where(eq(dealReports.id, id)).run();
+}
+
+/** Mark a report job as ready and store the on-disk pointer. */
+export function markReportReady(id: string, data: {
+  path: string;
+  sizeBytes: number;
+  model: string;
+  durationMs: number;
+}): void {
+  db.update(dealReports).set({
+    status: "ready",
+    stage: "saved",
+    path: data.path,
+    sizeBytes: data.sizeBytes,
+    model: data.model,
+    durationMs: data.durationMs,
+  }).where(eq(dealReports.id, id)).run();
+}
+
+/** Mark a report job as failed and store the error message. */
+export function markReportFailed(id: string, errorMessage: string): void {
+  db.update(dealReports).set({
+    status: "failed",
+    stage: "failed",
+    errorMessage,
+  }).where(eq(dealReports.id, id)).run();
 }
 
 export function getReportById(id: string) {

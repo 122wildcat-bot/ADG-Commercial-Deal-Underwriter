@@ -77,20 +77,27 @@ export const dealShares = sqliteTable("deal_shares", {
 });
 
 // ── Deal reports ────────────────────────────────────────────────────────────
-// AI Investor Reports are expensive and slow to generate (~45-90s, ~$0.10-
-// 0.30 in API tokens) — we save every successful render so the user can re-
-// download or share it later, and so a 502 during HTTP delivery doesn't lose
-// the work. PDFs live on the /data volume under reports/<dealId>/<id>.pdf.
+// AI Investor Reports are expensive and slow to generate (~45-90s+, sometimes
+// 2-3min with web search). Generation runs in the background; the row is the
+// source of truth for its progress. Status flow:
+//   generating → ready    (PDF saved at `path`, sizeBytes set)
+//   generating → failed   (errorMessage set; path empty)
+// The client polls GET /api/reports/:id every ~1.5s to update a progress bar
+// against the `stage` field.
 export const dealReports = sqliteTable("deal_reports", {
   id:           text("id").primaryKey(),           // nanoid
   dealId:       text("deal_id").notNull(),
   userId:       integer("user_id").notNull(),
   kind:         text("kind").notNull().default("investor"), // "investor" | future kinds
+  status:       text("status").notNull().default("ready"),  // "generating" | "ready" | "failed"
+  stage:        text("stage").notNull().default("saved"),   // queued | ai_thinking | ai_searching | ai_writing | rendering | saving | saved | failed
+  errorMessage: text("error_message"),
   filename:     text("filename").notNull(),        // disposition-ready filename
-  path:         text("path").notNull(),            // relative to <dataDir>/reports
-  sizeBytes:    integer("size_bytes").notNull(),
+  path:         text("path").notNull().default(""),// relative to <dataDir>/reports; empty until status=ready
+  sizeBytes:    integer("size_bytes").notNull().default(0),
   model:        text("model"),                     // e.g. "claude-opus-4-8"
   durationMs:   integer("duration_ms"),
+  startedAt:    text("started_at"),
   createdAt:    text("created_at").notNull(),
 });
 
