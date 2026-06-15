@@ -2,6 +2,8 @@ import type { Express, Request, Response } from "express";
 import type { Server } from "http";
 import { z } from "zod";
 import multer from "multer";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 import { underwrite } from "../shared/engine/underwrite";
 import type { DealInputs } from "../shared/types";
@@ -34,6 +36,7 @@ import {
   startReportJob,
   updateDeal,
   updateReportStage,
+  updateUserProfile,
 } from "./storage";
 import {
   hashPassword,
@@ -170,6 +173,63 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
 
   app.get("/api/auth/me", requireAuth, (req, res) => {
     res.json({ user: safeUser(req.user!) });
+  });
+
+  // ── ADG Team Suite SSO ──────────────────────────────────────────────────
+  // The Suite mints a 90s HS256 JWT signed with SSO_SHARED_SECRET (same
+  // value on the Suite and every tool) and sends the user to /sso?token=…
+  // We verify it, find-or-create the user by email, then mint our OWN JWT
+  // and hand it to the SPA via /#sso=… (consumeSsoToken() in main.tsx picks
+  // it up and stores it in localStorage). Mirrors flipiq's contract; the
+  // standalone email/password login is untouched.
+  const SSO_SHARED_SECRET = (process.env.SSO_SHARED_SECRET || "").trim();
+  const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || "").toLowerCase();
+  app.get("/sso", async (req, res) => {
+    const loginRedirect = "/#/login";
+    try {
+      const token = String(req.query.token || "");
+      if (!token || !SSO_SHARED_SECRET) return res.redirect(loginRedirect);
+
+      const payload = jwt.verify(token, SSO_SHARED_SECRET) as {
+        email?: string;
+        name?: string;
+        role?: "admin" | "agent" | "user";
+        suite_user_id?: string;
+      };
+
+      const email = String(payload.email || "").toLowerCase().trim();
+      if (!email) return res.redirect(loginRedirect);
+      const name = (payload.name && String(payload.name).trim()) || email.split("@")[0];
+
+      // Map Suite role → underwriter role. ADMIN_EMAIL match also wins.
+      const isAdmin = payload.role === "admin" || (ADMIN_EMAIL && email === ADMIN_EMAIL);
+      const role: "user" | "admin" = isAdmin ? "admin" : "user";
+
+      let user = getUserByEmail(email);
+      if (!user) {
+        // Auto-provision. Random hash satisfies NOT NULL; the user has no
+        // usable password — they sign in only via the Suite handoff. Status
+        // "active" because the Suite already approved them; no pending step.
+        const passwordHash = await bcrypt.hash(`sso:${email}:${Date.now()}:${Math.random()}`, 12);
+        user = createUser({ email, passwordHash, name, role, status: "active" });
+      } else {
+        // Repeat SSO: keep name/role in sync with the Suite; lift any
+        // pending/blocked status back to active (Suite vetted them).
+        if (user.name !== name || user.role !== role) {
+          updateUserProfile(user.id, { name, role });
+          user = getUserById(user.id) || user;
+        }
+        if (user.status !== "active") {
+          setUserStatus(user.id, "active");
+          user = getUserById(user.id) || user;
+        }
+      }
+
+      const localToken = signToken(user);
+      return res.redirect(`/#sso=${localToken}`);
+    } catch {
+      return res.redirect(loginRedirect);
+    }
   });
 
   // ── deals ─────────────────────────────────────────────────────────────
@@ -396,16 +456,18 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
           inputs,
           outputs,
           onStage: (stage) => {
-            console.log(`[investor-report] report=${reportId} stage=${stage}`);
+            console.log(`[investor-report] report=${reportId} stage=${stage} +${((Date.now() - t0) / 1000).toFixed(1)}s`);
             updateReportStage(reportId, stage);
           },
         });
-        console.log(`[investor-report] report=${reportId} claude_ms=${result.durationMs}`);
+        console.log(`[investor-report] report=${reportId} claude_ms=${result.durationMs} html_chars=${result.html.length} usage=${JSON.stringify(result.usage)}`);
         updateReportStage(reportId, "rendering");
+        const tRender = Date.now();
         const pdf = await renderHtmlToPdf(result.html, {
           left: "ADG · The Adam Druck Group · Investment Underwriting & Valuation",
           right: deal.name,
         });
+        console.log(`[investor-report] report=${reportId} render_ms=${Date.now() - tRender} pdf_bytes=${pdf.length}`);
         updateReportStage(reportId, "saving");
         const saved = await saveReportPdf({ dealId: deal.id, reportId, pdf });
         markReportReady(reportId, {

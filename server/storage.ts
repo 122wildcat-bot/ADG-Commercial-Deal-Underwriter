@@ -161,6 +161,15 @@ export function setUserPassword(id: number, passwordHash: string): void {
   db.update(users).set({ passwordHash }).where(eq(users.id, id)).run();
 }
 
+/** Sync name (and optionally role) on repeat SSO from the Suite. */
+export function updateUserProfile(id: number, data: { name?: string; role?: "user" | "admin" }): void {
+  const patch: Record<string, string> = {};
+  if (data.name !== undefined) patch.name = data.name;
+  if (data.role !== undefined) patch.role = data.role;
+  if (Object.keys(patch).length === 0) return;
+  db.update(users).set(patch).where(eq(users.id, id)).run();
+}
+
 export function deleteUser(id: number): void {
   db.delete(users).where(eq(users.id, id)).run();
 }
