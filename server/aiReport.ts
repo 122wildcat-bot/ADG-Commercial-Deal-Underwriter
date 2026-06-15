@@ -121,19 +121,38 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
   });
 
   // Bridge Anthropic stream events → stage updates so the client's progress
-  // bar reflects what the model is actually doing in real time.
+  // bar reflects what the model is actually doing in real time. Two subtle
+  // points:
+  //
+  //  - Claude can emit reasoning preamble TEXT blocks *before* it calls web
+  //    search. If we emit "ai_writing" on the first text block, the bar
+  //    jumps to 65% and then back to 35% once the search starts — bad UX
+  //    and misleading. So we only emit "ai_writing" once we've already
+  //    passed "ai_searching" (or web search is disabled entirely).
+  //
+  //  - The updateReportStage storage helper is monotonic (only advances,
+  //    never reverses) as a belt-and-suspenders guard against any
+  //    out-of-order callbacks.
   let sawSearch = false;
   let sawText = false;
   stream.on("streamEvent", (event) => {
     if (event.type !== "content_block_start") return;
     const cb = (event as { content_block?: { type?: string } }).content_block;
     if (!cb) return;
-    if (cb.type === "server_tool_use" && !sawSearch) {
-      sawSearch = true;
-      args.onStage?.("ai_searching");
-    } else if (cb.type === "text" && !sawText) {
-      sawText = true;
-      args.onStage?.("ai_writing");
+    if (cb.type === "server_tool_use") {
+      if (!sawSearch) {
+        sawSearch = true;
+        args.onStage?.("ai_searching");
+      }
+    } else if (cb.type === "text") {
+      // Only treat a text block as "writing the report" once we've already
+      // searched (or we never planned to). An early text block is reasoning
+      // preamble, not the final report HTML.
+      const pastSearch = sawSearch || !useSearch;
+      if (pastSearch && !sawText) {
+        sawText = true;
+        args.onStage?.("ai_writing");
+      }
     }
   });
 

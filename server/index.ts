@@ -4,6 +4,7 @@ import { createServer } from "http";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { seedAdminFromEnv } from "./seedAdmin";
+import { cleanupOrphanedReports } from "./storage";
 
 const app = express();
 const httpServer = createServer(app);
@@ -53,6 +54,11 @@ app.use((req, res, next) => {
 
   // Seed bootstrap admin from env (idempotent — runs on every boot).
   await seedAdminFromEnv((m) => log(m, "seed-admin"));
+
+  // Any report row still in status="generating" at boot time belongs to a
+  // process that no longer exists (redeploy, OOM, etc.). Mark them failed so
+  // the UI shows a clear error instead of an indefinite spinner.
+  cleanupOrphanedReports((m) => log(m, "report-cleanup"));
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

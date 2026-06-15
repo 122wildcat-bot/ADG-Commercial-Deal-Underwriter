@@ -99,12 +99,15 @@ export function DealAnalysisPage({ id }: { id: string }) {
       // 2. Poll status until ready / failed. Each poll is a quick GET so the
       //    Railway edge timeout doesn't apply.
       const startedAt = Date.now();
-      const TIMEOUT_MS = 8 * 60_000;
+      // Claude with web search + adaptive thinking can legitimately take
+      // 3-5+ minutes on a hard report. 15 minutes is the SDK timeout (10
+      // min) plus enough slack to also cover render + save.
+      const TIMEOUT_MS = 15 * 60_000;
       while (true) {
         await new Promise((r) => setTimeout(r, 1_500));
         if (Date.now() - startedAt > TIMEOUT_MS) {
           setReportNote(
-            "The report has been running for more than 8 minutes — leaving it in the background. It will show up in Saved Reports below once it finishes, or with an error if it doesn't.",
+            "The report has been running for more than 15 minutes — leaving it in the background. It will show up in Saved Reports below once it finishes, or with an error if it doesn't.",
           );
           break;
         }
