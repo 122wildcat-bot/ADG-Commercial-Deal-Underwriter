@@ -470,6 +470,15 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
         console.log(`[investor-report] report=${reportId} render_ms=${Date.now() - tRender} pdf_bytes=${pdf.length}`);
         updateReportStage(reportId, "saving");
         const saved = await saveReportPdf({ dealId: deal.id, reportId, pdf });
+        // Belt + suspenders: prove the file is readable before we mark the
+        // row "ready". If the disk write succeeded silently but the file
+        // isn't there a moment later (volume mount race, perms, etc.), the
+        // user would see "ready" but Download would 410.
+        try {
+          readReportPdf(saved.relPath);
+        } catch (verifyErr) {
+          throw new Error(`PDF saved but not readable back: ${(verifyErr as Error).message}`);
+        }
         markReportReady(reportId, {
           path: saved.relPath,
           sizeBytes: saved.sizeBytes,

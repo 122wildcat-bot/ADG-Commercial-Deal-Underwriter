@@ -131,8 +131,19 @@ export function DealAnalysisPage({ id }: { id: string }) {
         }
         setActiveStage(report.stage);
         if (report.status === "ready") {
-          await downloadPdf(`/api/reports/${reportId}/download`, "GET", report.filename).catch(() => {});
-          setReportNote("Investor report ready — downloaded and saved.");
+          // Surface download errors instead of silently swallowing them —
+          // the previous .catch(() => {}) hid genuine failures (file
+          // missing, browser blocking the programmatic click, etc.) behind
+          // a fake "downloaded and saved" message.
+          try {
+            await downloadPdf(`/api/reports/${reportId}/download`, "GET", report.filename);
+            setReportNote("Investor report ready — downloaded and saved.");
+          } catch (dlErr) {
+            const msg = dlErr instanceof ApiError ? dlErr.message : (dlErr as Error).message || "Unknown error";
+            setReportNote(
+              `Investor report finished and is saved, but the automatic download didn't trigger (${msg}). Click the Download button on the row below.`,
+            );
+          }
           break;
         }
         if (report.status === "failed") {
@@ -333,7 +344,15 @@ export function DealAnalysisPage({ id }: { id: string }) {
                   <button
                     type="button"
                     disabled={r.status !== "ready"}
-                    onClick={() => downloadPdf(`/api/reports/${r.id}/download`, "GET", r.filename).catch(() => {})}
+                    onClick={async () => {
+                      try {
+                        await downloadPdf(`/api/reports/${r.id}/download`, "GET", r.filename);
+                        setReportNote(null);
+                      } catch (dlErr) {
+                        const msg = dlErr instanceof ApiError ? dlErr.message : (dlErr as Error).message || "Unknown error";
+                        setReportNote(`Download failed: ${msg}`);
+                      }
+                    }}
                     className="btn btn-secondary text-xs disabled:opacity-40 disabled:cursor-not-allowed"
                     title={r.status === "ready" ? "Download" : "Not ready yet"}
                   >

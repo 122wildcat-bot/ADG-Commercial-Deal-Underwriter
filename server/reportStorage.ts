@@ -42,12 +42,16 @@ export async function saveReportPdf(args: {
 
 /**
  * Read a stored report PDF by its relative path (the value stored in the
- * `path` column of deal_reports). Throws if the file is missing.
+ * `path` column of deal_reports). Throws if the file is missing — and logs
+ * the absolute path it was looking for so we can diagnose stale rows
+ * (e.g. row marked ready but PDF disappeared because /data wasn't a
+ * persistent volume during a prior deploy).
  */
 export function readReportPdf(relPath: string): Buffer {
   const abs = path.join(reportsRoot(), relPath);
   if (!existsSync(abs)) {
-    throw new Error("Report file is missing from disk. It may have been deleted.");
+    console.error(`[reportStorage] PDF missing on disk: relPath=${relPath} abs=${abs} root=${reportsRoot()}`);
+    throw new Error("Report file is missing from disk. It may have been deleted, or this row was saved on an ephemeral filesystem.");
   }
   return readFileSync(abs);
 }
