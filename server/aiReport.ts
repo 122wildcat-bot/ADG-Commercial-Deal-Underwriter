@@ -306,9 +306,26 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
   const textBlocks = finalMessage.content.filter(
     (b): b is Anthropic.Messages.TextBlock => b.type === "text",
   );
-  const html = textBlocks.map((b) => b.text).join("\n").trim();
-  if (!html || !/<!doctype html/i.test(html)) {
+  const fullText = textBlocks.map((b) => b.text).join("\n").trim();
+
+  // Slice exactly from <!DOCTYPE html> to </html>. Anything before is preamble
+  // (Opus 4.8 with thinking disabled sometimes leaks "I'll research X first…"
+  // reasoning into the visible response; the API guide warns about this).
+  // Anything after </html> is similarly trimmed. This is more robust than
+  // trying to prompt the preamble away.
+  const docStart = fullText.search(/<!doctype html/i);
+  if (docStart === -1) {
+    console.error(`[aiReport] no <!DOCTYPE html> in ${fullText.length}-char response. First 400 chars: ${fullText.slice(0, 400)}`);
     throw new Error("The model did not return an HTML document.");
+  }
+  let html = fullText.slice(docStart);
+  const closeIdx = html.lastIndexOf("</html>");
+  if (closeIdx !== -1) html = html.slice(0, closeIdx + "</html>".length);
+  html = html.trim();
+
+  const preambleChars = docStart;
+  if (preambleChars > 0) {
+    console.log(`[aiReport] stripped ${preambleChars}-char preamble before <!DOCTYPE html>`);
   }
 
   return {
