@@ -92,17 +92,20 @@ export function DealAnalysisPage({ id }: { id: string }) {
     setReportNote(null);
     setActiveStage("queued");
     try {
-      // 1. Kick off the background job; we get a reportId back instantly.
-      const { reportId } = await api.post<{ reportId: string }>(`/api/deals/${id}/report`);
+      // 1. Kick off the background job. Retry the POST on transient network
+      //    failures — Railway sometimes drops a request during a deploy.
+      const reportId = await retryNetwork(async () => {
+        const r = await api.post<{ reportId: string }>(`/api/deals/${id}/report`);
+        return r.reportId;
+      });
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
 
-      // 2. Poll status until ready / failed. Each poll is a quick GET so the
-      //    Railway edge timeout doesn't apply.
+      // 2. Poll status until ready / failed. A single failed poll (network
+      //    blip, deploy) shouldn't abort the whole flow — tolerate up to
+      //    20 consecutive failures (~30s) before giving up.
       const startedAt = Date.now();
-      // Claude with web search + adaptive thinking can legitimately take
-      // 3-5+ minutes on a hard report. 15 minutes is the SDK timeout (10
-      // min) plus enough slack to also cover render + save.
       const TIMEOUT_MS = 15 * 60_000;
+      let pollErrors = 0;
       while (true) {
         await new Promise((r) => setTimeout(r, 1_500));
         if (Date.now() - startedAt > TIMEOUT_MS) {
@@ -111,7 +114,21 @@ export function DealAnalysisPage({ id }: { id: string }) {
           );
           break;
         }
-        const { report } = await api.get<{ report: SavedReport }>(`/api/reports/${reportId}`);
+        let report: SavedReport;
+        try {
+          const r = await api.get<{ report: SavedReport }>(`/api/reports/${reportId}`);
+          report = r.report;
+          pollErrors = 0;
+        } catch (pollErr) {
+          pollErrors += 1;
+          if (pollErrors >= 20) {
+            setReportNote(
+              "Lost connection to the server while watching the report. It may still be generating — check Saved Reports below in a minute or two.",
+            );
+            break;
+          }
+          continue; // try again on the next tick
+        }
         setActiveStage(report.stage);
         if (report.status === "ready") {
           await downloadPdf(`/api/reports/${reportId}/download`, "GET", report.filename).catch(() => {});
@@ -124,12 +141,40 @@ export function DealAnalysisPage({ id }: { id: string }) {
         }
       }
     } catch (err) {
-      setReportNote(err instanceof ApiError ? err.message : (err as Error).message || "Report failed.");
+      // POST itself failed even after retries.
+      const msg = err instanceof ApiError ? err.message : (err as Error).message || "Report failed.";
+      const isNetworkErr = /Failed to fetch|NetworkError|ERR_NETWORK/i.test(msg);
+      setReportNote(
+        isNetworkErr
+          ? "Lost connection to the server. The Underwriter may be mid-deploy — wait a minute and try again, or check Saved Reports below in case the report is already running."
+          : msg,
+      );
     } finally {
       setReporting(false);
       setActiveStage(null);
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
     }
+  }
+
+  // Retry an async call on transient network errors. Returns the first success;
+  // re-throws the last error after 3 attempts. ApiError responses (the server
+  // replied with a non-2xx) are NOT retried — those are real, surface them.
+  async function retryNetwork<T>(fn: () => Promise<T>): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await fn();
+      } catch (e) {
+        lastErr = e;
+        if (e instanceof ApiError) throw e; // server replied; not a network issue
+        const msg = (e as Error)?.message || "";
+        const isNetwork = /Failed to fetch|NetworkError|ERR_NETWORK|TypeError/i.test(msg);
+        if (!isNetwork) throw e;
+        // 1s, 2s, 4s
+        await new Promise((r) => setTimeout(r, 1_000 * Math.pow(2, attempt)));
+      }
+    }
+    throw lastErr;
   }
 
   return (
