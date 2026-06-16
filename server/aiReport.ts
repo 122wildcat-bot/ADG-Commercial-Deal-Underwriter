@@ -311,8 +311,7 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
   // Slice exactly from <!DOCTYPE html> to </html>. Anything before is preamble
   // (Opus 4.8 with thinking disabled sometimes leaks "I'll research X first…"
   // reasoning into the visible response; the API guide warns about this).
-  // Anything after </html> is similarly trimmed. This is more robust than
-  // trying to prompt the preamble away.
+  // Anything after </html> is similarly trimmed.
   const docStart = fullText.search(/<!doctype html/i);
   if (docStart === -1) {
     console.error(`[aiReport] no <!DOCTYPE html> in ${fullText.length}-char response. First 400 chars: ${fullText.slice(0, 400)}`);
@@ -325,8 +324,33 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
 
   const preambleChars = docStart;
   if (preambleChars > 0) {
-    console.log(`[aiReport] stripped ${preambleChars}-char preamble before <!DOCTYPE html>`);
+    console.log(`[aiReport] stripped ${preambleChars}-char preamble before <!DOCTYPE html>: "${fullText.slice(0, Math.min(200, preambleChars))}…"`);
   }
+
+  // Belt + suspenders: the model also occasionally leaks reasoning INSIDE
+  // the body, as a stray text node before the first real child element. The
+  // first child of <body> should always be an element (the cover div, a
+  // header, etc.) — never raw text. Strip any text-content that sits
+  // between <body> and the first '<'.
+  html = html.replace(
+    /(<body[^>]*>)([^<]+)/i,
+    (_match, openTag: string, leaked: string) => {
+      if (leaked.trim().length > 0) {
+        console.log(`[aiReport] stripped ${leaked.length}-char leaked text inside <body>: "${leaked.trim().slice(0, 200)}"`);
+      }
+      return openTag;
+    },
+  );
+  // Also strip stray text between </head> and <body> (rare but possible).
+  html = html.replace(
+    /(<\/head>)([^<]+)(<body)/i,
+    (_match, headClose: string, leaked: string, bodyOpen: string) => {
+      if (leaked.trim().length > 0) {
+        console.log(`[aiReport] stripped ${leaked.length}-char leaked text between </head> and <body>: "${leaked.trim().slice(0, 200)}"`);
+      }
+      return headClose + bodyOpen;
+    },
+  );
 
   return {
     configured: true,

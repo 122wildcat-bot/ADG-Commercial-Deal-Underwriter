@@ -187,16 +187,29 @@ Typography:
 - Body 11pt, line-height 1.55. Tight 8pt paragraph spacing.
 
 Cover-page rules:
-- Full-bleed CB Blue with min-height: 9.4in (the only element allowed to use min-height).
+- Full-bleed CB Blue with min-height: 8.4in (the only element allowed to use min-height). MUST fit entirely on PAGE 1 of the printed PDF — never let it bleed onto page 2. Apply page-break-after: always on the cover and page-break-inside: avoid on its container.
+- The cover container's content must be COMPACT. Tighter padding (0.6in top, 0.4in left/right). No oversized vertical gaps between the brand mark, eyebrow, title, subtitle, address, prepared-by, and confidential block. Each element separated by 12-18pt, not 36-60pt.
+- The cover title is the heaviest element; cap it at 48pt Fraunces italic (NOT 72pt). Two short lines max; never let the title wrap to three lines.
 - ALL text white or celestial — NEVER ink-on-navy.
 - Hero title can mix Inter white + Fraunces italic celestial (e.g. "Commercial Mixed-Use Acquisition Analysis" with "Acquisition Analysis" set in italic celestial).
+- Margins around the cover content: padding 0.5in 0.45in (NOT 1in or larger). Don't pad to the edges — fill the page densely.
 
 Body sections (2-7):
 - Paper #fbfbfa background, ink body text, CB Blue headers, celestial eyebrows + accents.
 - Section eyebrow: Inter 10pt small caps letter-spacing 0.18em color celestial.
-- Section title: Fraunces italic 32-36pt color CB Blue.
-- Section subtitle: Inter 13pt color #555.
-- Body paragraphs: 11pt 1.55, paragraph-spacing 8pt. <strong> rendered semibold CB Blue (NOT black).
+- Section title: Fraunces italic 26-30pt color CB Blue (reduced from 32-36 — leave more room on each page).
+- Section subtitle: Inter 12pt color #555.
+- Body paragraphs: 10.5pt line-height 1.45, paragraph-spacing 6pt. <strong> rendered semibold CB Blue (NOT black).
+
+SPACING DISCIPLINE — the report must fill each page densely, not leave half-pages of white space:
+- Between sections: 20-24pt max (NEVER 40+).
+- Between a section header and the first paragraph: 8pt.
+- Between paragraphs: 6pt.
+- Between table caption and table: 4pt.
+- Inside callout boxes: 14pt internal padding (not 24pt).
+- Inside tables: 6pt vertical cell padding (not 12pt).
+- No purely-decorative blank divs; no <br> stacks; no trailing empty elements.
+- The full report is 8-10 printed pages. If you're under 6 or over 12, the layout is wrong.
 
 Tables:
 - Header row: CB Blue background, white small caps 10pt, padding 8pt 10pt.
