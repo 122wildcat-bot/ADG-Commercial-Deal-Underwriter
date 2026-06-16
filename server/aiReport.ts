@@ -14,6 +14,11 @@ import type { DealInputs, DealOutputs } from "../shared/types";
 import { buildReportSystemPrompt, type AgentBrand } from "./reportSystemPrompt";
 
 const DEFAULT_MODEL = "claude-opus-4-8";
+// When the primary model is overloaded, the last retry attempt switches to
+// this fallback. Different model → different load pool, so a Sonnet attempt
+// often succeeds when Opus is overloaded. Same API surface, ~2-3x faster,
+// half the cost. The user can override with ANTHROPIC_FALLBACK_MODEL.
+const FALLBACK_MODEL = "claude-sonnet-4-6";
 // 64K (well below Opus 4.8's 128K ceiling). At 32K with adaptive thinking
 // + the newer web_search_20260209's dynamic filtering, the model burned
 // the entire budget on reasoning + tool calls and ran out of room for
@@ -35,6 +40,8 @@ export interface GenerateReportArgs {
   enableWebSearch?: boolean;
   /** Stage transitions during generation — for the polling progress bar. */
   onStage?: (stage: "ai_thinking" | "ai_searching" | "ai_writing") => void;
+  /** Override the default model (used by the retry path for overload fallback). */
+  modelOverride?: string;
 }
 
 export interface GenerateReportResult {
@@ -67,15 +74,26 @@ export function isReportConfigured(): boolean {
 export async function generateAiReportWithRetry(args: GenerateReportArgs): Promise<GenerateReportResult> {
   const RETRIES = 2;
   let lastErr: unknown;
+  let sawOverloaded = false;
   for (let attempt = 0; attempt <= RETRIES; attempt++) {
     try {
       if (attempt > 0) console.log(`[aiReport] retry attempt ${attempt + 1}/${RETRIES + 1}…`);
+      // Final attempt + we've been bouncing on overloaded errors → switch to
+      // the fallback model. Different load pool, often available when the
+      // primary is overloaded.
+      const useFallback = attempt === RETRIES && sawOverloaded;
+      if (useFallback) {
+        const fb = process.env.ANTHROPIC_FALLBACK_MODEL || FALLBACK_MODEL;
+        console.log(`[aiReport] previous attempts hit overloaded; falling back to ${fb}`);
+        return await generateAiReport({ ...args, modelOverride: fb });
+      }
       return await generateAiReport(args);
     } catch (e) {
       lastErr = e;
       const msg = ((e as Error).message || "").slice(0, 300);
       const transient = isTransientApiError(e);
-      console.log(`[aiReport] attempt ${attempt + 1} failed: ${msg} (transient=${transient})`);
+      if (/overloaded/i.test(msg)) sawOverloaded = true;
+      console.log(`[aiReport] attempt ${attempt + 1} failed: ${msg} (transient=${transient}, sawOverloaded=${sawOverloaded})`);
       if (!transient || attempt === RETRIES) break;
       // 5s, 10s. Anthropic 5xx incidents typically clear within seconds.
       const backoffMs = 5_000 * Math.pow(2, attempt);
@@ -134,7 +152,7 @@ export async function generateAiReport(args: GenerateReportArgs): Promise<Genera
   if (!apiKey) {
     throw new Error("AI report is not configured. Set ANTHROPIC_API_KEY on this deployment.");
   }
-  const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+  const model = args.modelOverride || process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
   const client = new Anthropic({ apiKey, timeout: REQUEST_TIMEOUT_MS });
 
   const system = buildReportSystemPrompt(args.agent);
