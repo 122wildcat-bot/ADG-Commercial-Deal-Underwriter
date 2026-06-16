@@ -10,7 +10,7 @@ import type { DealInputs } from "../shared/types";
 import { extractDealFromDocument, MAX_UPLOAD_BYTES } from "./aiExtract";
 import { renderHtmlToPdf, slugifyForFilename } from "./pdfRender";
 import { buildPrintHtml } from "./printTemplate";
-import { generateAiReport, isReportConfigured } from "./aiReport";
+import { generateAiReportWithRetry, isReportConfigured } from "./aiReport";
 import { saveReportPdf, readReportPdf, deleteReportPdf } from "./reportStorage";
 
 import {
@@ -451,7 +451,7 @@ export async function registerRoutes(_server: Server, app: Express): Promise<voi
       console.log(`[investor-report] report=${reportId} deal=${deal.id} starting…`);
       try {
         const outputs = underwrite(inputs);
-        const result = await generateAiReport({
+        const result = await generateAiReportWithRetry({
           deal,
           inputs,
           outputs,

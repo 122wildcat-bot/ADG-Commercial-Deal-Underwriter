@@ -55,6 +55,80 @@ export function isReportConfigured(): boolean {
   return Boolean(process.env.ANTHROPIC_API_KEY);
 }
 
+/**
+ * Wrap generateAiReport with retry-on-transient-error logic. The Anthropic
+ * SDK auto-retries 5xx errors at the HTTP layer, but only BEFORE a stream
+ * has started — once we're streaming, a mid-flight 500 is not retried.
+ * This higher-level wrapper restarts the whole generation from scratch on
+ * transient failures (5xx, overloaded, rate-limited) with exponential
+ * backoff. After exhausting retries it re-throws the last error with a
+ * user-friendly message.
+ */
+export async function generateAiReportWithRetry(args: GenerateReportArgs): Promise<GenerateReportResult> {
+  const RETRIES = 2;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= RETRIES; attempt++) {
+    try {
+      if (attempt > 0) console.log(`[aiReport] retry attempt ${attempt + 1}/${RETRIES + 1}…`);
+      return await generateAiReport(args);
+    } catch (e) {
+      lastErr = e;
+      const msg = ((e as Error).message || "").slice(0, 300);
+      const transient = isTransientApiError(e);
+      console.log(`[aiReport] attempt ${attempt + 1} failed: ${msg} (transient=${transient})`);
+      if (!transient || attempt === RETRIES) break;
+      // 5s, 10s. Anthropic 5xx incidents typically clear within seconds.
+      const backoffMs = 5_000 * Math.pow(2, attempt);
+      console.log(`[aiReport] backing off ${backoffMs}ms before retry…`);
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+  }
+  throw new Error(friendlyError(lastErr));
+}
+
+function isTransientApiError(e: unknown): boolean {
+  const msg = (e as Error)?.message || "";
+  if (/Internal server error/i.test(msg)) return true;
+  if (/overloaded_error/i.test(msg)) return true;
+  if (/api_error/i.test(msg)) return true;
+  if (/rate.?limit/i.test(msg)) return true;
+  if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED/i.test(msg)) return true;
+  const anyErr = e as { status?: number };
+  const status = anyErr?.status;
+  if (typeof status === "number" && (status === 408 || status === 409 || status === 429 || status >= 500)) return true;
+  return false;
+}
+
+/** Translate raw SDK / API errors into a one-line message safe to surface in the UI. */
+function friendlyError(e: unknown): string {
+  const raw = (e as Error)?.message || String(e);
+  // Anthropic returns the API error response JSON inside the SDK error message.
+  // Try to pull out request_id + a short reason; fall back to the raw string.
+  let reason = "";
+  let requestId = "";
+  try {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (m) {
+      const j = JSON.parse(m[0]);
+      reason = j?.error?.message || j?.error?.type || "";
+      requestId = j?.request_id || "";
+    }
+  } catch { /* ignore */ }
+  if (/Internal server error/i.test(reason) || /Internal server error/i.test(raw)) {
+    return requestId
+      ? `Claude's API hit a transient error after multiple retries. This usually clears up within a few minutes — try again. (Anthropic ref: ${requestId})`
+      : "Claude's API hit a transient error after multiple retries. Try again in a few minutes.";
+  }
+  if (/overloaded/i.test(reason) || /overloaded/i.test(raw)) {
+    return "Claude is overloaded right now. Try again in a few minutes.";
+  }
+  if (/rate.?limit/i.test(reason) || /rate.?limit/i.test(raw)) {
+    return "Hit Anthropic's rate limit. Try again in a minute.";
+  }
+  if (reason) return `Report generation failed: ${reason}${requestId ? ` (ref: ${requestId})` : ""}`;
+  return raw.slice(0, 300);
+}
+
 export async function generateAiReport(args: GenerateReportArgs): Promise<GenerateReportResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
