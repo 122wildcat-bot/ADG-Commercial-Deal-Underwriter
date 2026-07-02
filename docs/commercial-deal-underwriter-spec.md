@@ -348,9 +348,11 @@ insufficient.
 ## 9. AI features (degrade gracefully — fleet convention)
 
 Always fall back to a non-AI path when `ANTHROPIC_API_KEY` is missing or a call
-fails; never block core flows on the API. Default model **`claude-sonnet-4-6`**,
-overridable via `ANTHROPIC_MODEL` (latest: Opus 4.7 `claude-opus-4-7`, Sonnet
-4.6 `claude-sonnet-4-6`, Haiku 4.5 `claude-haiku-4-5`). Use a strict JSON schema
+fails; never block core flows on the API. Default model **`claude-opus-4-8`**
+(the report generator falls back to `claude-sonnet-4-6` when Opus is
+overloaded), overridable via `ANTHROPIC_MODEL` (latest: Opus 4.8
+`claude-opus-4-8`, Sonnet 4.6 `claude-sonnet-4-6`, Haiku 4.5
+`claude-haiku-4-5`). Use a strict JSON schema
 (`output_config.format`) for structured output and `cache_control` on the frozen
 system prompt.
 
