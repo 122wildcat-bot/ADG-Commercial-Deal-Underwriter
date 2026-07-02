@@ -92,8 +92,8 @@ structured so an SSO hook drops in later.** Confirm with Adam before wiring.
 
 ## AI features — Phase 3, degrade gracefully (don't build yet)
 When added: fall back to non-AI whenever `ANTHROPIC_API_KEY` is missing/the call
-fails. Default model `claude-sonnet-4-6` (override `ANTHROPIC_MODEL`; latest:
-Opus 4.7 `claude-opus-4-7`, Sonnet 4.6, Haiku 4.5 `claude-haiku-4-5`). Strict
+fails. Default model `claude-opus-4-8` (override `ANTHROPIC_MODEL`; latest:
+Opus 4.8 `claude-opus-4-8`, Sonnet 4.6, Haiku 4.5 `claude-haiku-4-5`). Strict
 JSON schema (`output_config.format`); `cache_control` on the frozen system
 prompt.
 
